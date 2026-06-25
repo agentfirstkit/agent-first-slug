@@ -1,0 +1,25 @@
+[package]
+name = "agent-first-slug"
+version = "0.1.0"
+edition = "2021"
+description = "Rust slug generation with explicit caller configuration for path and URL path segments."
+license = "MIT"
+repository = "https://github.com/agentfirstkit/agent-first-slug"
+readme = "README.md"
+include = [
+    "src/**",
+    "Cargo.toml",
+    "README.md",
+    "LICENSE",
+    "clippy.toml",
+]
+
+[dependencies]
+unicode-general-category = "1.1"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
