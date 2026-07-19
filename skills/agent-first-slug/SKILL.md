@@ -71,25 +71,29 @@ Install the standalone command with its default `cli` feature:
 cargo install agent-first-slug
 ```
 
-Run `afslug <INPUT>` for the default Unicode policy and parse the terminal
-AFDATA event together with the exit status:
+Run `afslug slugify <INPUT>` to generate a slug or `afslug validate <VALUE>` to
+check an existing value, and parse the terminal AFDATA event together with the
+exit status:
 
 ```bash
-afslug "Hello, 世界!"
+afslug slugify "Hello, 世界!"
 # {"kind":"result","result":{"changed_from_input":true,"code":"slugify","slug":"hello-世界"},"trace":{}}
 
-afslug "Hello, World!" --output plain
+afslug slugify "Hello, World!" --output plain
 # kind=result result.changed_from_input=true result.code=slugify result.slug=hello-world
+
+afslug validate "my-slug" --policy url-path
 ```
 
 `--output` accepts `json`, `yaml`, or `plain`. Bare `--version` is conventional
 human text; `--version --output json|yaml|plain` is structured. Argument and
 slug failures are AFDATA error events on stdout with nonzero exit status.
 
-The CLI intentionally exposes no character-set, validation, transliteration,
-fallback, or truncation flags. Use the library when the default config is not
-the complete intended contract; do not post-process the CLI slug to simulate a
-different policy.
+`slugify` sets the `SlugConfig` surface through flags (`afslug slugify --help`
+enumerates them); pass every flag the target contract needs rather than
+post-processing the slug to simulate a different policy. Transliteration is the
+one policy the CLI cannot express — its static replacement map only exists in
+the library — so reach for the crate when you need it.
 
 ## Verification
 

@@ -30,20 +30,24 @@ Prebuilt archives are also available from
 
 ## CLI
 
-`afslug` applies [`SlugConfig::default()`](#default-unicode-slugs) and emits one
-AFDATA protocol event. JSON is the default; YAML and plain output are also
-available.
+`afslug` generates and validates slugs, emitting one AFDATA protocol event per
+run. JSON is the default; YAML and plain output are also available.
 
 ```bash
-afslug "Hello, 世界!"
+afslug slugify "Hello, 世界!"
 # {"kind":"result","result":{"changed_from_input":true,"code":"slugify","slug":"hello-世界"},"trace":{}}
 
-afslug "Hello, World!" --output plain
+afslug slugify "Hello, World!" --output plain
 # kind=result result.changed_from_input=true result.code=slugify result.slug=hello-world
+
+afslug validate "my-slug" --policy url-path
 ```
 
-Use the Rust library when you need to customize character sets, dot handling,
-validation, truncation, empty output, or transliteration.
+`slugify` exposes the [`SlugConfig`](#default-unicode-slugs) surface as flags —
+delimiter, case, truncation, character set, dot handling, validation, and an
+empty-slug fallback (`afslug slugify --help` lists them); `validate` checks an
+existing value as a local or URL path segment. Transliteration stays
+library-only: its static replacement map cannot be built from CLI arguments.
 
 ## Agent Skill
 

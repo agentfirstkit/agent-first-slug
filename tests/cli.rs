@@ -18,7 +18,7 @@ fn stdout_json(output: &Output) -> Value {
 
 #[test]
 fn slugifies_with_a_strict_afdata_result() {
-    let output = run(&["Hello, 世界!"]);
+    let output = run(&["slugify", "Hello, 世界!"]);
 
     assert!(output.status.success());
     assert!(output.stderr.is_empty());
@@ -38,7 +38,7 @@ fn slugifies_with_a_strict_afdata_result() {
 
 #[test]
 fn supports_plain_afdata_output() {
-    let output = run(&["Already-Slug", "--output", "plain"]);
+    let output = run(&["slugify", "Already-Slug", "--output", "plain"]);
 
     assert!(output.status.success());
     assert!(output.stderr.is_empty());
@@ -51,7 +51,7 @@ fn supports_plain_afdata_output() {
 
 #[test]
 fn supports_yaml_afdata_output() {
-    let output = run(&["Hello, World!", "--output", "yaml"]);
+    let output = run(&["slugify", "Hello, World!", "--output", "yaml"]);
 
     assert!(output.status.success());
     assert!(output.stderr.is_empty());
@@ -68,6 +68,80 @@ fn supports_yaml_afdata_output() {
             "trace: {}\n",
         )
     );
+}
+
+#[test]
+fn slugify_honors_config_flags() {
+    // ASCII-only charset drops the CJK run, truncation caps the slug, and the
+    // trailing delimiter the cut exposes is stripped.
+    let output = run(&[
+        "slugify",
+        "Rust 版 CLI Tool",
+        "--charset",
+        "ascii-alphanumeric",
+        "--max-chars",
+        "8",
+    ]);
+
+    assert!(output.status.success());
+    assert_eq!(stdout_json(&output)["result"]["slug"], "rust-cli");
+}
+
+#[test]
+fn slugify_keeps_case_when_lowercasing_is_disabled() {
+    let output = run(&["slugify", "Hello World", "--no-lowercase"]);
+
+    assert!(output.status.success());
+    assert_eq!(stdout_json(&output)["result"]["slug"], "Hello-World");
+}
+
+#[test]
+fn slugify_substitutes_fallback_for_empty_output() {
+    let output = run(&["slugify", "!!!", "--fallback", "item"]);
+
+    assert!(output.status.success());
+    assert_eq!(stdout_json(&output)["result"]["slug"], "item");
+}
+
+#[test]
+fn slugify_validation_failure_is_a_structured_error() {
+    // Punctuation-only input yields an empty slug, which is not a valid URL segment.
+    let output = run(&["slugify", "!!!", "--validation", "url-path"]);
+
+    assert_eq!(output.status.code(), Some(1));
+    let event = stdout_json(&output);
+    assert_eq!(event["kind"], "error");
+    assert_eq!(event["error"]["code"], "slug_error");
+}
+
+#[test]
+fn validate_accepts_a_valid_segment() {
+    let output = run(&["validate", "my-slug", "--policy", "url-path"]);
+
+    assert!(output.status.success());
+    assert_eq!(
+        stdout_json(&output),
+        json!({
+            "kind": "result",
+            "result": {
+                "code": "validate",
+                "value": "my-slug",
+                "valid": true
+            },
+            "trace": {}
+        })
+    );
+}
+
+#[test]
+fn validate_rejects_an_invalid_segment_as_a_structured_error() {
+    let output = run(&["validate", "bad/slug", "--policy", "local-path"]);
+
+    assert_eq!(output.status.code(), Some(1));
+    let event = stdout_json(&output);
+    assert_eq!(event["kind"], "error");
+    assert_eq!(event["error"]["code"], "slug_error");
+    assert_eq!(event["error"]["retryable"], false);
 }
 
 #[test]
