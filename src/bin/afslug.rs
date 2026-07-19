@@ -3,8 +3,8 @@ use std::process::ExitCode;
 
 use agent_first_data::{CliEmitter, OutputFormat, cli_parse_output};
 use agent_first_slug::{SlugConfig, slugify};
-use clap::{ArgAction, Parser, error::ErrorKind};
-use serde_json::json;
+use clap::{ArgAction, CommandFactory, Parser, error::ErrorKind};
+use serde_json::{Value, json};
 
 #[derive(Parser)]
 #[command(
@@ -35,6 +35,19 @@ fn main() -> ExitCode {
         Ok(Some(version)) => return write_text(&version),
         Ok(None) => {}
         Err(event) => return emit_event_error(event, OutputFormat::Json, 2),
+    }
+
+    // Render `--help` (and `--help --recursive --output markdown`, the form the
+    // release pipeline exports into docs/cli.md) through afdata's help renderer
+    // before clap parses, so afslug's CLI docs match every other spore's format.
+    match agent_first_data::cli_handle_help_or_continue(
+        &raw_args,
+        &Args::command(),
+        &agent_first_data::HelpConfig::human_cli_default(),
+    ) {
+        Ok(Some(help)) => return write_text(&help),
+        Ok(None) => {}
+        Err(error) => return emit_value_error(error, OutputFormat::Json, 2),
     }
 
     let args = match Args::try_parse() {
@@ -82,6 +95,14 @@ fn emit_event_error(
 ) -> ExitCode {
     let mut emitter = CliEmitter::new(io::stdout().lock(), output).with_strict_protocol();
     match emitter.emit(event) {
+        Ok(()) => ExitCode::from(exit_code),
+        Err(_) => ExitCode::from(4),
+    }
+}
+
+fn emit_value_error(error: Value, output: OutputFormat, exit_code: u8) -> ExitCode {
+    let mut emitter = CliEmitter::new(io::stdout().lock(), output).with_strict_protocol();
+    match emitter.emit_validated_value(error) {
         Ok(()) => ExitCode::from(exit_code),
         Err(_) => ExitCode::from(4),
     }
