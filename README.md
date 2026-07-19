@@ -2,15 +2,54 @@
 
 Rust slug generation with explicit caller configuration for path and URL path segments.
 
+> **Ask your agent:** "Add agent-first-slug to my project and use it to slugify titles for URL path segments."
+
 Start by choosing the target surface: a local filesystem path segment, a URL path
 segment, or a legacy slug format you need to preserve. The examples below show
 complete config values so the behavior is visible at the call site.
 
-## Install
+## Install the Library
 
 ```bash
-cargo add agent-first-slug
+cargo add agent-first-slug --no-default-features
 ```
+
+## Install the CLI
+
+```bash
+# prebuilt binary
+brew install agentfirstkit/tap/afslug   # macOS / Linux
+scoop bucket add agentfirstkit https://github.com/agentfirstkit/scoop-bucket && scoop install afslug   # Windows
+
+# or from crates.io
+cargo install agent-first-slug
+```
+
+Prebuilt archives are also available from
+[GitHub Releases](https://github.com/agentfirstkit/agent-first-slug/releases).
+
+## CLI
+
+`afslug` applies [`SlugConfig::default()`](#default-unicode-slugs) and emits one
+AFDATA protocol event. JSON is the default; YAML and plain output are also
+available.
+
+```bash
+afslug "Hello, 世界!"
+# {"kind":"result","result":{"changed_from_input":true,"code":"slugify","slug":"hello-世界"},"trace":{}}
+
+afslug "Hello, World!" --output plain
+# kind=result result.changed_from_input=true result.code=slugify result.slug=hello-world
+```
+
+Use the Rust library when you need to customize character sets, dot handling,
+validation, truncation, empty output, or transliteration.
+
+## Agent Skill
+
+Use [`skills/agent-first-slug/SKILL.md`](skills/agent-first-slug/SKILL.md) to
+teach a coding agent when to choose the Rust library or the default-only
+`afslug` CLI, and how to preserve stable identifier behavior.
 
 ## Default Unicode Slugs
 

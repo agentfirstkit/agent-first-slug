@@ -1,20 +1,34 @@
 [package]
 name = "agent-first-slug"
-version = "0.1.0"
-edition = "2021"
+version = "0.2.0"
+edition = "2024"
 description = "Rust slug generation with explicit caller configuration for path and URL path segments."
 license = "MIT"
 repository = "https://github.com/agentfirstkit/agent-first-slug"
 readme = "README.md"
 include = [
     "src/**",
+    "tests/**",
+    "skills/**",
     "Cargo.toml",
     "README.md",
     "LICENSE",
     "clippy.toml",
 ]
 
+[[bin]]
+name = "afslug"
+path = "src/bin/afslug.rs"
+required-features = ["cli"]
+
+[features]
+default = ["cli"]
+cli = ["dep:agent-first-data", "dep:clap", "dep:serde_json"]
+
 [dependencies]
+agent-first-data = { version = "0.19.1", default-features = false, optional = true }
+clap = { version = "4", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
 unicode-general-category = "1.1"
 
 [lints.clippy]

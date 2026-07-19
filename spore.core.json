@@ -2,26 +2,28 @@
   "$schema": "https://cmn.dev/schemas/v1/spore-core.json",
   "id": "agent-first-slug",
   "name": "Agent-First Slug",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "domain": "agentfirstkit.com",
   "key": "ed25519.BwbSzqdDYyMN1pPW5snRk3afrJAovHn8aueMvDpfNKVw",
   "synopsis": "Rust slug generation with explicit caller configuration for path and URL path segments.",
   "intent": [
     "Provide a reusable slug primitive where callers configure character classes, dots, transliteration, truncation, empty behavior, and validation instead of relying on hard-coded product rules",
-    "Keep the library generic: no CLI, presets, downstream project names, hidden fallback words, or built-in legacy modes",
+    "Keep the library generic: no presets, downstream project names, hidden fallback words, or built-in legacy modes",
+    "Provide a small afslug CLI that applies the default rules and emits AFDATA protocol events for one-off use",
+    "Publish the agent-first-slug skill with explicit Rust library and afslug CLI workflows",
     "Make slug generation deterministic and test-covered so callers can preserve or migrate their own identifiers intentionally"
   ],
   "license": "MIT",
   "mutations": [
-    "Initial release: configurable slug generation for local path and URL path segments."
+    "Add the afslug CLI with JSON, YAML, and plain AFDATA output.",
+    "Add the agent-first-slug skill for library and CLI usage."
   ],
   "bonds": [],
   "tree": {
     "algorithm": "blob_tree_blake3_nfc",
     "exclude_names": [
       ".git",
-      ".cmn",
-      "target"
+      ".cmn"
     ],
     "follow_rules": [
       ".gitignore"

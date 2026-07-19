@@ -4,7 +4,7 @@
 use std::borrow::Cow;
 use std::fmt;
 
-use unicode_general_category::{get_general_category, GeneralCategory};
+use unicode_general_category::{GeneralCategory, get_general_category};
 
 /// Rules used by [`slugify`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -353,10 +353,10 @@ fn validate_local_path_segment(value: &str) -> Result<(), SlugError> {
         match ch {
             '/' | '\\' => return Err(SlugError::PathSegmentSeparator { character: ch }),
             _ if ch.is_whitespace() => {
-                return Err(SlugError::PathSegmentWhitespace { character: ch })
+                return Err(SlugError::PathSegmentWhitespace { character: ch });
             }
             _ if ch.is_control() => {
-                return Err(SlugError::PathSegmentControlCharacter { character: ch })
+                return Err(SlugError::PathSegmentControlCharacter { character: ch });
             }
             _ => {}
         }

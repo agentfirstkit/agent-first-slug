@@ -1,0 +1,4 @@
+interface:
+  display_name: "Agent-First Slug"
+  short_description: "Generate safe deterministic slugs"
+  default_prompt: "Use $agent-first-slug to add or run deterministic slug generation with the Rust library or afslug CLI."
