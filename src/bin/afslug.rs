@@ -1,6 +1,9 @@
 use std::io;
 use std::process::ExitCode;
 
+use agent_first_data::skill::{
+    self, SkillAction, SkillAgentSelection, SkillAsset, SkillOptions, SkillScope, SkillSpec,
+};
 use agent_first_data::{CliEmitter, OutputFormat, cli_parse_output};
 use agent_first_slug::{
     AllowedCharacterSet, DotHandlingPolicy, EmptyOutputPolicy, SlugConfig, SlugResult,
@@ -34,6 +37,82 @@ enum Command {
     Slugify(SlugifyArgs),
     /// Validate an existing value as a path segment.
     Validate(ValidateArgs),
+    /// Manage Agent-First Slug skills for Codex, Claude Code, opencode, and Hermes.
+    Skill(SkillCommand),
+}
+
+const SKILL_SPEC: SkillSpec = SkillSpec {
+    name: "agent-first-slug",
+    source: include_str!("../../skills/agent-first-slug/SKILL.md"),
+    title: "Agent-First Slug",
+    marker_slug: "afslug",
+    // SKILL.md ships with an OpenAI/Codex agent interface file; it installs
+    // alongside SKILL.md as a bundled asset.
+    assets: &[SkillAsset {
+        path: "agents/openai.yaml",
+        contents: include_str!("../../skills/agent-first-slug/agents/openai.yaml"),
+    }],
+};
+
+#[derive(clap::Args)]
+struct SkillCommand {
+    #[command(subcommand)]
+    action: SkillCliAction,
+}
+
+#[derive(Subcommand)]
+enum SkillCliAction {
+    /// Show whether the Agent-First Slug skill is installed, valid, and up to date.
+    Status(SkillTargetArgs),
+    /// Install the Agent-First Slug skill.
+    Install(SkillWriteArgs),
+    /// Remove an afslug-managed Agent-First Slug skill.
+    Uninstall(SkillWriteArgs),
+}
+
+#[derive(clap::Args)]
+struct SkillTargetArgs {
+    /// Agent to manage. Defaults to all personal skill targets.
+    #[arg(long = "agent", value_enum, default_value_t = SkillAgentArg::All)]
+    agent: SkillAgentArg,
+    /// Skill scope.
+    #[arg(long = "scope", value_enum, default_value_t = SkillScopeArg::Personal)]
+    scope: SkillScopeArg,
+    /// Directory that contains skill folders. Requires an explicit single --agent.
+    #[arg(long = "skills-dir")]
+    skills_dir: Option<String>,
+}
+
+#[derive(clap::Args)]
+struct SkillWriteArgs {
+    #[command(flatten)]
+    target: SkillTargetArgs,
+    /// Overwrite or remove an unmanaged Agent-First Slug skill at the target path.
+    #[arg(long)]
+    force: bool,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum SkillAgentArg {
+    /// Manage every agent that supports the requested scope.
+    All,
+    /// Codex under $CODEX_HOME/skills.
+    Codex,
+    /// Claude Code under ~/.claude/skills or .claude/skills.
+    #[value(name = "claude-code", alias = "claude")]
+    ClaudeCode,
+    /// opencode under ~/.config/opencode/skills or .opencode/skills.
+    Opencode,
+    /// Hermes under $HERMES_HOME/skills or ~/.hermes/skills.
+    Hermes,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum SkillScopeArg {
+    /// Install under the user-level skills directory.
+    Personal,
+    /// Install under the current workspace's skills directory.
+    Workspace,
 }
 
 #[derive(clap::Args)]
@@ -159,10 +238,17 @@ impl PolicyArg {
 
 fn main() -> ExitCode {
     let raw_args = std::env::args().collect::<Vec<_>>();
+    let build = match env!("GIT_SHA") {
+        "unknown" => None,
+        sha => Some(sha),
+    };
     match agent_first_data::cli_handle_version_or_continue(
         &raw_args,
+        &Args::command(),
         "afslug",
+        Some(env!("DISPLAY_NAME")),
         env!("CARGO_PKG_VERSION"),
+        build,
     ) {
         Ok(Some(version)) => return write_text(&version),
         Ok(None) => {}
@@ -199,6 +285,72 @@ fn main() -> ExitCode {
     match args.command {
         Command::Slugify(slugify_args) => run_slugify(slugify_args, output),
         Command::Validate(validate_args) => run_validate(validate_args, output),
+        Command::Skill(skill_cmd) => run_skill(skill_cmd, output),
+    }
+}
+
+fn run_skill(cmd: SkillCommand, output: OutputFormat) -> ExitCode {
+    let (action, options) = match cmd.action {
+        SkillCliAction::Status(target) => (SkillAction::Status, skill_options(target, false)),
+        SkillCliAction::Install(write) => (
+            SkillAction::Install,
+            skill_options(write.target, write.force),
+        ),
+        SkillCliAction::Uninstall(write) => (
+            SkillAction::Uninstall,
+            skill_options(write.target, write.force),
+        ),
+    };
+    match skill::run_skill_admin(&SKILL_SPEC, action, &options) {
+        Ok(report) => match serde_json::to_value(&report) {
+            Ok(value) => {
+                let mut emitter =
+                    CliEmitter::new(io::stdout().lock(), output).with_strict_protocol();
+                match emitter.emit_result(value) {
+                    Ok(()) => ExitCode::SUCCESS,
+                    Err(_) => ExitCode::from(4),
+                }
+            }
+            Err(error) => emit_error(
+                "serialization_failed",
+                &format!("failed to serialize skill report: {error}"),
+                output,
+                1,
+            ),
+        },
+        Err(err) => {
+            let event = agent_first_data::json_error("cli_error", &err.message)
+                .hint_if_some(err.hint.as_deref())
+                .field(
+                    "partial_report",
+                    err.partial_report
+                        .and_then(|report| serde_json::to_value(report).ok())
+                        .unwrap_or(Value::Null),
+                )
+                .build();
+            match event {
+                Ok(event) => emit_event_error(event, output, 1),
+                Err(_) => ExitCode::from(4),
+            }
+        }
+    }
+}
+
+fn skill_options(target: SkillTargetArgs, force: bool) -> SkillOptions {
+    SkillOptions {
+        agent: match target.agent {
+            SkillAgentArg::All => SkillAgentSelection::All,
+            SkillAgentArg::Codex => SkillAgentSelection::Codex,
+            SkillAgentArg::ClaudeCode => SkillAgentSelection::ClaudeCode,
+            SkillAgentArg::Opencode => SkillAgentSelection::Opencode,
+            SkillAgentArg::Hermes => SkillAgentSelection::Hermes,
+        },
+        scope: match target.scope {
+            SkillScopeArg::Personal => SkillScope::Personal,
+            SkillScopeArg::Workspace => SkillScope::Workspace,
+        },
+        skills_dir: target.skills_dir,
+        force,
     }
 }
 

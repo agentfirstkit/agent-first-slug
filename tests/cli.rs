@@ -162,15 +162,62 @@ fn explicit_json_version_is_structured() {
     let output = run(&["--version", "--output", "json"]);
 
     assert!(output.status.success());
-    assert_eq!(
-        stdout_json(&output),
-        json!({
-            "kind": "result",
-            "result": {
-                "code": "version",
-                "version": env!("CARGO_PKG_VERSION")
-            },
-            "trace": {}
-        })
+    let value = stdout_json(&output);
+    assert_eq!(value["kind"], "result");
+    assert_eq!(value["result"]["code"], "version");
+    assert_eq!(value["result"]["name"], "afslug");
+    assert_eq!(value["result"]["display_name"], "Agent-First Slug");
+    assert_eq!(value["result"]["version"], env!("CARGO_PKG_VERSION"));
+    // "build" (git SHA) is environment-dependent (absent without a reachable
+    // .git, e.g. a source tarball) so it is deliberately not asserted here.
+    assert_eq!(value["trace"], json!({}));
+}
+
+#[test]
+fn skill_install_bundles_skill_and_agent_asset() {
+    let dir = std::env::temp_dir().join(format!("afslug_skill_test_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let dir_str = dir.to_str().expect("temp path is utf-8");
+    let target = [
+        "--agent",
+        "claude-code",
+        "--scope",
+        "personal",
+        "--skills-dir",
+        dir_str,
+    ];
+
+    let mut install = vec!["skill", "install"];
+    install.extend_from_slice(&target);
+    install.push("--force");
+    let installed = run(&install);
+    assert!(
+        installed.status.success(),
+        "install failed: {}",
+        String::from_utf8_lossy(&installed.stderr)
     );
+    let skill_dir = dir.join("agent-first-slug");
+    assert!(
+        skill_dir.join("SKILL.md").is_file(),
+        "SKILL.md must install"
+    );
+    assert!(
+        skill_dir.join("agents").join("openai.yaml").is_file(),
+        "the bundled agents/openai.yaml asset must install alongside SKILL.md"
+    );
+
+    let mut status = vec!["skill", "status"];
+    status.extend_from_slice(&target);
+    let value = stdout_json(&run(&status));
+    assert_eq!(value["result"]["current_all"], json!(true));
+
+    let mut uninstall = vec!["skill", "uninstall"];
+    uninstall.extend_from_slice(&target);
+    let removed = run(&uninstall);
+    assert!(removed.status.success());
+    assert!(
+        !skill_dir.exists(),
+        "uninstall must remove the skill directory"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }

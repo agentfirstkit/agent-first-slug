@@ -10,6 +10,7 @@ Usage: afslug [OPTIONS] <COMMAND>
 Commands:
   slugify   Generate a slug from input text
   validate  Validate an existing value as a path segment
+  skill     Manage Agent-First Slug skills for Codex, Claude Code, opencode, and Hermes
   help      Print this message or the help of the given subcommand(s)
 
 Options:
@@ -105,4 +106,128 @@ Options:
   -h, --help
           Print help (see a summary with '-h')
 ```
-AFDATA: 0.19.1
+
+## afslug skill - Manage Agent-First Slug skills for Codex, Claude Code, opencode, and Hermes
+
+```text
+Usage: skill <COMMAND>
+
+Commands:
+  status     Show whether the Agent-First Slug skill is installed, valid, and up to date
+  install    Install the Agent-First Slug skill
+  uninstall  Remove an afslug-managed Agent-First Slug skill
+  help       Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help
+          Print help
+```
+
+### afslug skill status - Show whether the Agent-First Slug skill is installed, valid, and up to date
+
+```text
+Usage: status [OPTIONS]
+
+Options:
+      --agent <AGENT>
+          Agent to manage. Defaults to all personal skill targets
+
+          Possible values:
+          - all:         Manage every agent that supports the requested scope
+          - codex:       Codex under $CODEX_HOME/skills
+          - claude-code: Claude Code under ~/.claude/skills or .claude/skills
+          - opencode:    opencode under ~/.config/opencode/skills or .opencode/skills
+          - hermes:      Hermes under $HERMES_HOME/skills or ~/.hermes/skills
+
+          [default: all]
+
+      --scope <SCOPE>
+          Skill scope
+
+          Possible values:
+          - personal:  Install under the user-level skills directory
+          - workspace: Install under the current workspace's skills directory
+
+          [default: personal]
+
+      --skills-dir <SKILLS_DIR>
+          Directory that contains skill folders. Requires an explicit single --agent
+
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+### afslug skill install - Install the Agent-First Slug skill
+
+```text
+Usage: install [OPTIONS]
+
+Options:
+      --agent <AGENT>
+          Agent to manage. Defaults to all personal skill targets
+
+          Possible values:
+          - all:         Manage every agent that supports the requested scope
+          - codex:       Codex under $CODEX_HOME/skills
+          - claude-code: Claude Code under ~/.claude/skills or .claude/skills
+          - opencode:    opencode under ~/.config/opencode/skills or .opencode/skills
+          - hermes:      Hermes under $HERMES_HOME/skills or ~/.hermes/skills
+
+          [default: all]
+
+      --scope <SCOPE>
+          Skill scope
+
+          Possible values:
+          - personal:  Install under the user-level skills directory
+          - workspace: Install under the current workspace's skills directory
+
+          [default: personal]
+
+      --skills-dir <SKILLS_DIR>
+          Directory that contains skill folders. Requires an explicit single --agent
+
+      --force
+          Overwrite or remove an unmanaged Agent-First Slug skill at the target path
+
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+### afslug skill uninstall - Remove an afslug-managed Agent-First Slug skill
+
+```text
+Usage: uninstall [OPTIONS]
+
+Options:
+      --agent <AGENT>
+          Agent to manage. Defaults to all personal skill targets
+
+          Possible values:
+          - all:         Manage every agent that supports the requested scope
+          - codex:       Codex under $CODEX_HOME/skills
+          - claude-code: Claude Code under ~/.claude/skills or .claude/skills
+          - opencode:    opencode under ~/.config/opencode/skills or .opencode/skills
+          - hermes:      Hermes under $HERMES_HOME/skills or ~/.hermes/skills
+
+          [default: all]
+
+      --scope <SCOPE>
+          Skill scope
+
+          Possible values:
+          - personal:  Install under the user-level skills directory
+          - workspace: Install under the current workspace's skills directory
+
+          [default: personal]
+
+      --skills-dir <SKILLS_DIR>
+          Directory that contains skill folders. Requires an explicit single --agent
+
+      --force
+          Overwrite or remove an unmanaged Agent-First Slug skill at the target path
+
+  -h, --help
+          Print help (see a summary with '-h')
+```
+AFDATA: 0.22.0
