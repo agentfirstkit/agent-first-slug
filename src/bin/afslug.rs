@@ -1,10 +1,10 @@
-use std::io;
+use std::io::{self, Write};
 use std::process::ExitCode;
 
 use agent_first_data::skill::{
     self, SkillAction, SkillAgentSelection, SkillAsset, SkillOptions, SkillScope, SkillSpec,
 };
-use agent_first_data::{CliEmitter, OutputFormat, cli_parse_output};
+use agent_first_data::{CliEmitter, OutputFormat, OutputTo, cli_parse_output};
 use agent_first_slug::{
     AllowedCharacterSet, DotHandlingPolicy, EmptyOutputPolicy, SlugConfig, SlugResult,
     SlugValidationPolicy, TransliterationPolicy, slugify, validate_slug,
@@ -16,7 +16,8 @@ use serde_json::{Value, json};
 #[command(
     name = "afslug",
     about = "Generate and validate slugs with explicit agent-first-slug rules.",
-    disable_version_flag = true
+    disable_version_flag = true,
+    disable_help_subcommand = true
 )]
 struct Args {
     #[command(subcommand)]
@@ -26,12 +27,17 @@ struct Args {
     #[arg(long, global = true, default_value = "json")]
     output: String,
 
+    /// Output routing: split, stdout, or stderr
+    #[arg(long, global = true, default_value = "split")]
+    output_to: String,
+
     /// Print the CLI version
-    #[arg(short = 'V', long, action = ArgAction::SetTrue)]
+    #[arg(long, action = ArgAction::SetTrue)]
     version: bool,
 }
 
 #[derive(Subcommand)]
+#[command(disable_help_subcommand = true)]
 enum Command {
     /// Generate a slug from input text.
     Slugify(SlugifyArgs),
@@ -61,6 +67,7 @@ struct SkillCommand {
 }
 
 #[derive(Subcommand)]
+#[command(disable_help_subcommand = true)]
 enum SkillCliAction {
     /// Show whether the Agent-First Slug skill is installed, valid, and up to date.
     Status(SkillTargetArgs),
@@ -238,58 +245,106 @@ impl PolicyArg {
 
 fn main() -> ExitCode {
     let raw_args = std::env::args().collect::<Vec<_>>();
+    let output_to = match requested_output_to(&raw_args) {
+        Ok(output_to) => output_to,
+        Err(message) => {
+            return emit_error(
+                "cli_error",
+                &message,
+                OutputFormat::Json,
+                OutputTo::Split,
+                2,
+            );
+        }
+    };
     let build = match env!("GIT_SHA") {
         "unknown" => None,
         sha => Some(sha),
     };
-    match agent_first_data::cli_handle_version_or_continue(
+    // Resolve version and progressively scoped help before clap so every
+    // machine-facing discovery path follows the same AFDATA output contract.
+    match agent_first_data::cli_handle_version_or_help_or_continue(
         &raw_args,
         &Args::command(),
+        &agent_first_data::HelpConfig::output_aware(),
         "afslug",
         Some(env!("DISPLAY_NAME")),
         env!("CARGO_PKG_VERSION"),
         build,
     ) {
-        Ok(Some(version)) => return write_text(&version),
+        Ok(Some(output)) => return write_text(&output, output_to),
         Ok(None) => {}
-        Err(event) => return emit_event_error(event, OutputFormat::Json, 2),
-    }
-
-    // Render `--help` (and `--help --recursive --output markdown`, the form the
-    // release pipeline exports into docs/cli.md) through afdata's help renderer
-    // before clap parses, so afslug's CLI docs match every other spore's format.
-    match agent_first_data::cli_handle_help_or_continue(
-        &raw_args,
-        &Args::command(),
-        &agent_first_data::HelpConfig::human_cli_default(),
-    ) {
-        Ok(Some(help)) => return write_text(&help),
-        Ok(None) => {}
-        Err(error) => return emit_value_error(error, OutputFormat::Json, 2),
+        Err(error) => return emit_value_error(error, OutputFormat::Json, output_to, 2),
     }
 
     let args = match Args::try_parse() {
         Ok(args) => args,
         Err(error) if error.kind() == ErrorKind::DisplayHelp => {
-            return write_text(&error.render().to_string());
+            return write_text(&error.render().to_string(), output_to);
         }
-        Err(error) => return emit_error("cli_error", &error.to_string(), OutputFormat::Json, 2),
+        Err(error)
+            if matches!(
+                error.kind(),
+                ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand | ErrorKind::MissingSubcommand
+            ) =>
+        {
+            return emit_event_error(
+                agent_first_data::build_cli_error(
+                    "a command is required",
+                    Some("try: afslug --help"),
+                ),
+                OutputFormat::Json,
+                output_to,
+                2,
+            );
+        }
+        Err(error) => {
+            return emit_error(
+                "cli_error",
+                &error.to_string(),
+                OutputFormat::Json,
+                output_to,
+                2,
+            );
+        }
     };
     let _ = args.version;
+    debug_assert_eq!(OutputTo::parse(&args.output_to).ok(), Some(output_to));
 
     let output = match cli_parse_output(&args.output) {
         Ok(output) => output,
-        Err(message) => return emit_error("cli_error", &message, OutputFormat::Json, 2),
+        Err(message) => {
+            return emit_error("cli_error", &message, OutputFormat::Json, output_to, 2);
+        }
     };
 
     match args.command {
-        Command::Slugify(slugify_args) => run_slugify(slugify_args, output),
-        Command::Validate(validate_args) => run_validate(validate_args, output),
-        Command::Skill(skill_cmd) => run_skill(skill_cmd, output),
+        Command::Slugify(slugify_args) => run_slugify(slugify_args, output, output_to),
+        Command::Validate(validate_args) => run_validate(validate_args, output, output_to),
+        Command::Skill(skill_cmd) => run_skill(skill_cmd, output, output_to),
     }
 }
 
-fn run_skill(cmd: SkillCommand, output: OutputFormat) -> ExitCode {
+fn requested_output_to(raw_args: &[String]) -> Result<OutputTo, String> {
+    let mut output_to = OutputTo::Split;
+    let mut args = raw_args.iter().skip(1);
+    while let Some(arg) = args.next() {
+        if arg == "--" {
+            break;
+        }
+        if let Some(value) = arg.strip_prefix("--output-to=") {
+            output_to = OutputTo::parse(value)?;
+        } else if arg == "--output-to" {
+            let value = args.next().ok_or_else(|| {
+                "--output-to requires a value: expected split, stdout, or stderr".to_string()
+            })?;
+            output_to = OutputTo::parse(value)?;
+        }
+    }
+    Ok(output_to)
+}
+
+fn run_skill(cmd: SkillCommand, output: OutputFormat, output_to: OutputTo) -> ExitCode {
     let (action, options) = match cmd.action {
         SkillCliAction::Status(target) => (SkillAction::Status, skill_options(target, false)),
         SkillCliAction::Install(write) => (
@@ -305,7 +360,7 @@ fn run_skill(cmd: SkillCommand, output: OutputFormat) -> ExitCode {
         Ok(report) => match serde_json::to_value(&report) {
             Ok(value) => {
                 let mut emitter =
-                    CliEmitter::new(io::stdout().lock(), output).with_strict_protocol();
+                    CliEmitter::from_output_to(output_to, output).with_strict_protocol();
                 match emitter.emit_result(value) {
                     Ok(()) => ExitCode::SUCCESS,
                     Err(_) => ExitCode::from(4),
@@ -315,6 +370,7 @@ fn run_skill(cmd: SkillCommand, output: OutputFormat) -> ExitCode {
                 "serialization_failed",
                 &format!("failed to serialize skill report: {error}"),
                 output,
+                output_to,
                 1,
             ),
         },
@@ -329,7 +385,7 @@ fn run_skill(cmd: SkillCommand, output: OutputFormat) -> ExitCode {
                 )
                 .build();
             match event {
-                Ok(event) => emit_event_error(event, output, 1),
+                Ok(event) => emit_event_error(event, output, output_to, 1),
                 Err(_) => ExitCode::from(4),
             }
         }
@@ -354,7 +410,7 @@ fn skill_options(target: SkillTargetArgs, force: bool) -> SkillOptions {
     }
 }
 
-fn run_slugify(args: SlugifyArgs, output: OutputFormat) -> ExitCode {
+fn run_slugify(args: SlugifyArgs, output: OutputFormat, output_to: OutputTo) -> ExitCode {
     // Transliteration is intentionally absent: its policy carries a `'static`
     // replacement map that a CLI cannot build from runtime input, so callers who
     // need it reach for the library.
@@ -373,15 +429,15 @@ fn run_slugify(args: SlugifyArgs, output: OutputFormat) -> ExitCode {
     };
 
     match slugify(&args.input, &config) {
-        Ok(result) => emit_slug_result(&result, output),
-        Err(error) => emit_error("slug_error", &error.to_string(), output, 1),
+        Ok(result) => emit_slug_result(&result, output, output_to),
+        Err(error) => emit_error("slug_error", &error.to_string(), output, output_to, 1),
     }
 }
 
-fn run_validate(args: ValidateArgs, output: OutputFormat) -> ExitCode {
+fn run_validate(args: ValidateArgs, output: OutputFormat, output_to: OutputTo) -> ExitCode {
     match validate_slug(&args.value, args.policy.into_lib()) {
         Ok(()) => {
-            let mut emitter = CliEmitter::new(io::stdout().lock(), output).with_strict_protocol();
+            let mut emitter = CliEmitter::from_output_to(output_to, output).with_strict_protocol();
             match emitter.emit_result(json!({
                 "code": "validate",
                 "value": args.value,
@@ -391,12 +447,12 @@ fn run_validate(args: ValidateArgs, output: OutputFormat) -> ExitCode {
                 Err(_) => ExitCode::from(4),
             }
         }
-        Err(error) => emit_error("slug_error", &error.to_string(), output, 1),
+        Err(error) => emit_error("slug_error", &error.to_string(), output, output_to, 1),
     }
 }
 
-fn emit_slug_result(result: &SlugResult, output: OutputFormat) -> ExitCode {
-    let mut emitter = CliEmitter::new(io::stdout().lock(), output).with_strict_protocol();
+fn emit_slug_result(result: &SlugResult, output: OutputFormat, output_to: OutputTo) -> ExitCode {
+    let mut emitter = CliEmitter::from_output_to(output_to, output).with_strict_protocol();
     match emitter.emit_result(json!({
         "code": "slugify",
         "slug": result.slug,
@@ -407,8 +463,14 @@ fn emit_slug_result(result: &SlugResult, output: OutputFormat) -> ExitCode {
     }
 }
 
-fn emit_error(code: &str, message: &str, output: OutputFormat, exit_code: u8) -> ExitCode {
-    let mut emitter = CliEmitter::new(io::stdout().lock(), output).with_strict_protocol();
+fn emit_error(
+    code: &str,
+    message: &str,
+    output: OutputFormat,
+    output_to: OutputTo,
+    exit_code: u8,
+) -> ExitCode {
+    let mut emitter = CliEmitter::from_output_to(output_to, output).with_strict_protocol();
     match emitter.emit_error(code, message) {
         Ok(()) => ExitCode::from(exit_code),
         Err(_) => ExitCode::from(4),
@@ -418,27 +480,36 @@ fn emit_error(code: &str, message: &str, output: OutputFormat, exit_code: u8) ->
 fn emit_event_error(
     event: agent_first_data::Event,
     output: OutputFormat,
+    output_to: OutputTo,
     exit_code: u8,
 ) -> ExitCode {
-    let mut emitter = CliEmitter::new(io::stdout().lock(), output).with_strict_protocol();
+    let mut emitter = CliEmitter::from_output_to(output_to, output).with_strict_protocol();
     match emitter.emit(event) {
         Ok(()) => ExitCode::from(exit_code),
         Err(_) => ExitCode::from(4),
     }
 }
 
-fn emit_value_error(error: Value, output: OutputFormat, exit_code: u8) -> ExitCode {
-    let mut emitter = CliEmitter::new(io::stdout().lock(), output).with_strict_protocol();
+fn emit_value_error(
+    error: Value,
+    output: OutputFormat,
+    output_to: OutputTo,
+    exit_code: u8,
+) -> ExitCode {
+    let mut emitter = CliEmitter::from_output_to(output_to, output).with_strict_protocol();
     match emitter.emit_validated_value(error) {
         Ok(()) => ExitCode::from(exit_code),
         Err(_) => ExitCode::from(4),
     }
 }
 
-fn write_text(text: &str) -> ExitCode {
-    use std::io::Write;
-
-    match io::stdout().lock().write_all(text.as_bytes()) {
+#[allow(clippy::disallowed_methods)]
+fn write_text(text: &str, output_to: OutputTo) -> ExitCode {
+    let result = match output_to {
+        OutputTo::Stderr => io::stderr().lock().write_all(text.as_bytes()),
+        OutputTo::Split | OutputTo::Stdout => io::stdout().lock().write_all(text.as_bytes()),
+    };
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(_) => ExitCode::from(4),
     }

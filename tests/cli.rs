@@ -16,6 +16,23 @@ fn stdout_json(output: &Output) -> Value {
     serde_json::from_slice(&output.stdout).expect("stdout should contain one JSON event")
 }
 
+fn stderr_json(output: &Output) -> Value {
+    serde_json::from_slice(&output.stderr).expect("stderr should contain one JSON event")
+}
+
+fn count_help_surface(command: &Value) -> (usize, usize) {
+    let mut commands = 1;
+    let mut arguments = command["arguments"].as_array().map_or(0, Vec::len);
+    if let Some(subcommands) = command["subcommands"].as_array() {
+        for subcommand in subcommands {
+            let (subcommand_count, argument_count) = count_help_surface(subcommand);
+            commands += subcommand_count;
+            arguments += argument_count;
+        }
+    }
+    (commands, arguments)
+}
+
 #[test]
 fn slugifies_with_a_strict_afdata_result() {
     let output = run(&["slugify", "Hello, 世界!"]);
@@ -109,7 +126,7 @@ fn slugify_validation_failure_is_a_structured_error() {
     let output = run(&["slugify", "!!!", "--validation", "url-path"]);
 
     assert_eq!(output.status.code(), Some(1));
-    let event = stdout_json(&output);
+    let event = stderr_json(&output);
     assert_eq!(event["kind"], "error");
     assert_eq!(event["error"]["code"], "slug_error");
 }
@@ -138,7 +155,7 @@ fn validate_rejects_an_invalid_segment_as_a_structured_error() {
     let output = run(&["validate", "bad/slug", "--policy", "local-path"]);
 
     assert_eq!(output.status.code(), Some(1));
-    let event = stdout_json(&output);
+    let event = stderr_json(&output);
     assert_eq!(event["kind"], "error");
     assert_eq!(event["error"]["code"], "slug_error");
     assert_eq!(event["error"]["retryable"], false);
@@ -149,8 +166,8 @@ fn reports_argument_errors_as_afdata_json() {
     let output = run(&[]);
 
     assert_eq!(output.status.code(), Some(2));
-    assert!(output.stderr.is_empty());
-    let event = stdout_json(&output);
+    assert!(output.stdout.is_empty());
+    let event = stderr_json(&output);
     assert_eq!(event["kind"], "error");
     assert_eq!(event["error"]["code"], "cli_error");
     assert_eq!(event["error"]["retryable"], false);
@@ -171,6 +188,128 @@ fn explicit_json_version_is_structured() {
     // "build" (git SHA) is environment-dependent (absent without a reachable
     // .git, e.g. a source tarball) so it is deliberately not asserted here.
     assert_eq!(value["trace"], json!({}));
+}
+
+#[test]
+fn bare_version_is_structured() {
+    let output = run(&["--version"]);
+
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    let value = stdout_json(&output);
+    assert_eq!(value["kind"], "result");
+    assert_eq!(value["result"]["code"], "version");
+    assert_eq!(value["result"]["name"], "afslug");
+    assert_eq!(value["result"]["version"], env!("CARGO_PKG_VERSION"));
+}
+
+#[test]
+fn version_short_is_rejected_as_structured_cli_error() {
+    let output = run(&["-V"]);
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let value = stderr_json(&output);
+    assert_eq!(value["kind"], "error");
+    assert_eq!(value["error"]["code"], "cli_error");
+}
+
+#[test]
+fn help_is_scoped_structured_and_token_bounded() {
+    let root = run(&["--help"]);
+    assert!(root.status.success());
+    assert!(root.stderr.is_empty());
+    let root_event = stdout_json(&root);
+    let root_help = &root_event["result"]["help"];
+    assert_eq!(root_event["result"]["code"], "help");
+    assert_eq!(root_help["scope"], "one_level");
+    assert_eq!(root_help["command_path"], "afslug");
+    assert!(
+        root_help["arguments"]
+            .as_array()
+            .expect("root arguments")
+            .iter()
+            .any(|argument| argument["name"] == "--output" && argument["global"] == true),
+        "root help must identify --output as global: {root_help}"
+    );
+    let version_argument = root_help["arguments"]
+        .as_array()
+        .expect("root arguments")
+        .iter()
+        .find(|argument| argument["name"] == "--version")
+        .expect("root help must advertise --version");
+    assert!(
+        version_argument.get("short").is_none(),
+        "--version must not expose a short alias: {root_help}"
+    );
+    assert!(
+        root_help["subcommands"]
+            .as_array()
+            .expect("root subcommands")
+            .iter()
+            .all(|command| command["name"] != "help"),
+        "the clap help pseudo-command must not be advertised: {root_help}"
+    );
+
+    let scoped = run(&["slugify", "--help"]);
+    assert!(scoped.status.success());
+    let scoped_event = stdout_json(&scoped);
+    let scoped_help = &scoped_event["result"]["help"];
+    assert_eq!(scoped_help["command_path"], "afslug slugify");
+    assert_eq!(scoped_help["inherited_arguments_from"], json!(["afslug"]));
+    assert!(
+        scoped_help["arguments"]
+            .as_array()
+            .expect("scoped arguments")
+            .iter()
+            .all(|argument| argument["name"] != "--output"),
+        "scoped structured help must not repeat inherited globals: {scoped_help}"
+    );
+
+    let plain = run(&["slugify", "--help", "--output", "plain"]);
+    assert!(plain.status.success());
+    let plain_stdout = String::from_utf8(plain.stdout).expect("plain help is UTF-8");
+    assert!(plain_stdout.contains("Usage: afslug slugify"));
+    assert!(plain_stdout.contains("--output"));
+
+    let recursive = run(&["--help", "--recursive"]);
+    assert!(recursive.status.success());
+    let recursive_event = stdout_json(&recursive);
+    let recursive_help = &recursive_event["result"]["help"];
+    let (commands, arguments) = count_help_surface(recursive_help);
+    let budget = 512 + commands * 160 + arguments * 120;
+    assert!(
+        recursive.stdout.len() < budget,
+        "recursive help exceeded its payload budget: {} >= {budget}",
+        recursive.stdout.len()
+    );
+}
+
+#[test]
+fn missing_and_pseudo_help_commands_are_structured_errors() {
+    let missing = run(&[]);
+    assert_eq!(missing.status.code(), Some(2));
+    assert!(missing.stdout.is_empty());
+    let missing_event = stderr_json(&missing);
+    assert_eq!(missing_event["error"]["message"], "a command is required");
+    assert_eq!(missing_event["error"]["hint"], "try: afslug --help");
+    assert!(
+        missing.stderr.len() < 256,
+        "missing-command error embedded eager help"
+    );
+
+    let pseudo = run(&["help"]);
+    assert_eq!(pseudo.status.code(), Some(2));
+    assert!(pseudo.stdout.is_empty());
+    assert_eq!(stderr_json(&pseudo)["kind"], "error");
+}
+
+#[test]
+fn output_to_stdout_unifies_error_events() {
+    let output = run(&["--output-to", "stdout"]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stderr.is_empty());
+    assert_eq!(stdout_json(&output)["kind"], "error");
 }
 
 #[test]

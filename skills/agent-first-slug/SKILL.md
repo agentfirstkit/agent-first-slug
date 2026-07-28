@@ -85,9 +85,14 @@ afslug slugify "Hello, World!" --output plain
 afslug validate "my-slug" --policy url-path
 ```
 
-`--output` accepts `json`, `yaml`, or `plain`. Bare `--version` is conventional
-human text; `--version --output json|yaml|plain` is structured. Argument and
-slug failures are AFDATA error events on stdout with nonzero exit status.
+`--output` accepts `json`, `yaml`, or `plain`. Help inherits the JSON default:
+start with `afslug --help`, then request only the relevant command (for example
+`afslug slugify --help`). Use `--recursive` only for a compact full-tree index,
+and `--output plain` for conventional human help. Bare `--version` and explicit
+JSON/YAML/plain version requests are structured AFDATA results. Argument and
+slug failures are AFDATA error events with nonzero exit status. Under the
+default `--output-to split` they go to stderr; select `--output-to stdout` for
+one ordered event stream.
 
 `slugify` sets the `SlugConfig` surface through flags (`afslug slugify --help`
 enumerates them); pass every flag the target contract needs rather than
@@ -100,5 +105,6 @@ the library — so reach for the crate when you need it.
 - Test unchanged input, punctuation-only input, Unicode, dots, empty output,
   truncation boundaries, fallbacks, and every selected validation policy.
 - For stable identifiers, add golden tests before refactoring a config.
-- For CLI changes, verify JSON/YAML/plain success, structured errors, and
-  explicit structured version output through the repository test script.
+- For CLI changes, verify JSON/YAML/plain success, scoped and recursive help,
+  structured errors, and bare structured version output through the repository
+  test script.

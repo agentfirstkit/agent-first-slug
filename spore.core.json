@@ -2,7 +2,7 @@
   "$schema": "https://cmn.dev/schemas/v1/spore-core.json",
   "id": "agent-first-slug",
   "name": "Agent-First Slug",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "domain": "agentfirstkit.com",
   "key": "ed25519.BwbSzqdDYyMN1pPW5snRk3afrJAovHn8aueMvDpfNKVw",
   "synopsis": "Rust slug generation with explicit caller configuration for path and URL path segments.",
@@ -15,9 +15,12 @@
   ],
   "license": "MIT",
   "mutations": [
-    "Add an afslug skill subcommand family (status/install/uninstall) that installs the Agent-First Slug skill for Codex, Claude Code, opencode, and Hermes, bundling both SKILL.md and its OpenAI/Codex agent interface asset.",
-    "Redesign --version output to the shared protocol-v1 shape, reporting the binary name, human-readable display name, package version, and the git commit SHA the binary was built from.",
-    "Upgrade the Agent-First Data dependency to 0.22.0, adopting its skill-admin toolkit and shared version pre-parser."
+    "Route every help request through the shared agent-first help renderer: the default is scoped structured JSON for one command level, --recursive returns a compact full-tree index, and --output plain restores conventional human help.",
+    "Drop clap's help pseudo-subcommand and replace the eager help dump on a missing command with a compact structured error carrying a 'try: afslug --help' hint.",
+    "Make --version always emit a structured AFDATA protocol result and remove the -V short alias so version discovery has exactly one machine-readable shape.",
+    "Add a global --output-to flag (split, stdout, stderr) that defaults to split, sending result events to stdout and error events to stderr, with stdout selectable for a single ordered event stream.",
+    "Upgrade the Agent-First Data dependency to 0.26.0 for the unified version/help pre-parser and output-routing emitter.",
+    "Add a release workflow that builds macOS, Linux, and Windows binaries and publishes the checksums Homebrew and Scoop packaging consumes."
   ],
   "bonds": [],
   "tree": {
