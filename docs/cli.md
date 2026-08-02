@@ -8,7 +8,7 @@ Generate and validate slugs with explicit agent-first-slug rules.
 
 ## Global arguments
 
-AFDATA registers these; no command declares them, and the syntax in [Commands](#commands) leaves them out.
+AFDATA registers these itself, so the syntax in [Commands](#commands) leaves them out.
 
 | Argument | Where | What it does |
 |---|---|---|
