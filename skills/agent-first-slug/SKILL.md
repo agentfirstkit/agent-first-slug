@@ -80,19 +80,33 @@ afslug slugify "Hello, 世界!"
 # {"kind":"result","result":{"changed_from_input":true,"code":"slugify","slug":"hello-世界"},"trace":{}}
 
 afslug slugify "Hello, World!" --output plain
-# kind=result result.changed_from_input=true result.code=slugify result.slug=hello-world
+# kind=result result.changed_from_input=true result.code=slugify result.slug=hello-world trace={}
 
 afslug validate "my-slug" --policy url-path
 ```
 
-`--output` accepts `json`, `yaml`, or `plain`. Help inherits the JSON default:
-start with `afslug --help`, then request only the relevant command (for example
-`afslug slugify --help`). Use `--recursive` only for a compact full-tree index,
-and `--output plain` for conventional human help. Bare `--version` and explicit
-JSON/YAML/plain version requests are structured AFDATA results. Argument and
-slug failures are AFDATA error events with nonzero exit status. Under the
-default `--output-to split` they go to stderr; select `--output-to stdout` for
-one ordered event stream.
+`--output` accepts `json`, `yaml`, or `plain`. Bare `--version` and explicit
+JSON/YAML/plain version requests are structured AFDATA results. Slug failures
+are AFDATA error events with nonzero exit status. Under the default
+`--output-to split` they go to stderr; select `--output-to stdout` for one
+ordered event stream — but note that an invocation rejected *before* it runs
+cannot honor that request, because the routing flag is part of the argv being
+rejected, so those always report on stderr.
+
+`afslug` is compiled from a closed registry: an invocation runs only when it
+matches exactly one registered shape, and there are no short flags. Discovery is
+one round trip — `afslug --help` routes to the commands, and `afslug <command>
+--help` returns every legal shape of that command, each complete with its
+optional arguments and closed value sets. There is no second level to ask for
+and no recursive mode. `--output plain` renders the same catalog for humans;
+`afslug --docs` renders the whole registry as Markdown, for reading rather than
+for calling.
+
+Rejections name their own classification in `error.code` — `cli_unknown_command`,
+`cli_unknown_argument`, `cli_unregistered_combination`, and siblings — so branch
+on the code rather than parsing the message. `cli_unregistered_combination` means
+the arguments were individually known but not a registered mix: read the shapes
+in `--help` rather than dropping arguments at random.
 
 `slugify` sets the `SlugConfig` surface through flags (`afslug slugify --help`
 enumerates them); pass every flag the target contract needs rather than
@@ -100,11 +114,16 @@ post-processing the slug to simulate a different policy. Transliteration is the
 one policy the CLI cannot express — its static replacement map only exists in
 the library — so reach for the crate when you need it.
 
+`skill install`/`uninstall`/`status` come in two shapes: the default fans out
+across every agent that supports the scope, and `--agent <name>` targets one.
+`--skills-dir` names a single directory, so it belongs only to the second.
+
 ## Verification
 
 - Test unchanged input, punctuation-only input, Unicode, dots, empty output,
   truncation boundaries, fallbacks, and every selected validation policy.
 - For stable identifiers, add golden tests before refactoring a config.
-- For CLI changes, verify JSON/YAML/plain success, scoped and recursive help,
-  structured errors, and bare structured version output through the repository
-  test script.
+- For CLI changes, verify JSON/YAML/plain success, per-command help, structured
+  errors, and bare structured version output through the repository test script.
+- A new argument combination is a registered shape, not a runtime check: add it
+  to the registry so `--help` advertises it and the parser enforces it.

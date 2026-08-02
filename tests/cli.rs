@@ -20,17 +20,8 @@ fn stderr_json(output: &Output) -> Value {
     serde_json::from_slice(&output.stderr).expect("stderr should contain one JSON event")
 }
 
-fn count_help_surface(command: &Value) -> (usize, usize) {
-    let mut commands = 1;
-    let mut arguments = command["arguments"].as_array().map_or(0, Vec::len);
-    if let Some(subcommands) = command["subcommands"].as_array() {
-        for subcommand in subcommands {
-            let (subcommand_count, argument_count) = count_help_surface(subcommand);
-            commands += subcommand_count;
-            arguments += argument_count;
-        }
-    }
-    (commands, arguments)
+fn help_of(output: &Output) -> Value {
+    stdout_json(output)["result"]["help"].clone()
 }
 
 #[test]
@@ -60,9 +51,12 @@ fn supports_plain_afdata_output() {
     assert!(output.status.success());
     assert!(output.stderr.is_empty());
     let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
+    // `trace={}` is present because plain renders an empty container explicitly
+    // rather than letting the key vanish; plain is not a lossy view of the JSON.
     assert_eq!(
         stdout,
-        "kind=result result.changed_from_input=true result.code=slugify result.slug=already-slug\n"
+        "kind=result result.changed_from_input=true result.code=slugify \
+         result.slug=already-slug trace={}\n"
     );
 }
 
@@ -169,7 +163,9 @@ fn reports_argument_errors_as_afdata_json() {
     assert!(output.stdout.is_empty());
     let event = stderr_json(&output);
     assert_eq!(event["kind"], "error");
-    assert_eq!(event["error"]["code"], "cli_error");
+    // The classification is the code itself, so an agent branches on one key
+    // rather than parsing a message or reading a second field.
+    assert_eq!(event["error"]["code"], "cli_unregistered_combination");
     assert_eq!(event["error"]["retryable"], false);
     assert_eq!(event["trace"], json!({}));
 }
@@ -204,112 +200,178 @@ fn bare_version_is_structured() {
 }
 
 #[test]
-fn version_short_is_rejected_as_structured_cli_error() {
-    let output = run(&["-V"]);
+fn short_flags_do_not_exist() {
+    // The registry has no short syntax at all, so `-V` is not a rejected alias
+    // of `--version` — it is simply not an argument.
+    for short in ["-V", "-h"] {
+        let output = run(&[short]);
 
-    assert_eq!(output.status.code(), Some(2));
-    assert!(output.stdout.is_empty());
-    let value = stderr_json(&output);
-    assert_eq!(value["kind"], "error");
-    assert_eq!(value["error"]["code"], "cli_error");
+        assert_eq!(output.status.code(), Some(2), "{short} must be rejected");
+        assert!(output.stdout.is_empty());
+        let value = stderr_json(&output);
+        assert_eq!(value["kind"], "error");
+        assert_eq!(value["error"]["code"], "cli_unknown_argument");
+        assert_eq!(
+            value["error"]["message"],
+            format!("unknown argument `{short}`")
+        );
+    }
 }
 
 #[test]
-fn help_is_scoped_structured_and_token_bounded() {
+fn root_help_routes_to_commands_without_listing_their_arguments() {
     let root = run(&["--help"]);
     assert!(root.status.success());
     assert!(root.stderr.is_empty());
-    let root_event = stdout_json(&root);
-    let root_help = &root_event["result"]["help"];
-    assert_eq!(root_event["result"]["code"], "help");
-    assert_eq!(root_help["scope"], "one_level");
-    assert_eq!(root_help["command_path"], "afslug");
-    assert!(
-        root_help["arguments"]
-            .as_array()
-            .expect("root arguments")
-            .iter()
-            .any(|argument| argument["name"] == "--output" && argument["global"] == true),
-        "root help must identify --output as global: {root_help}"
-    );
-    let version_argument = root_help["arguments"]
-        .as_array()
-        .expect("root arguments")
-        .iter()
-        .find(|argument| argument["name"] == "--version")
-        .expect("root help must advertise --version");
-    assert!(
-        version_argument.get("short").is_none(),
-        "--version must not expose a short alias: {root_help}"
-    );
-    assert!(
-        root_help["subcommands"]
-            .as_array()
-            .expect("root subcommands")
-            .iter()
-            .all(|command| command["name"] != "help"),
-        "the clap help pseudo-command must not be advertised: {root_help}"
-    );
+    assert_eq!(stdout_json(&root)["result"]["code"], "help");
 
+    let help = help_of(&root);
+    assert_eq!(help["schema"], "cli-help-v2");
+    assert_eq!(help["command_path"], "afslug");
+    // The root registers no combination, so it has no shape of its own — it is
+    // a router, and every entry is a ready-to-run next call.
+    assert!(help.get("shapes").is_none(), "{help}");
+    assert_eq!(
+        help["subcommands"],
+        json!([
+            "afslug skill --help",
+            "afslug slugify --help",
+            "afslug validate --help"
+        ])
+    );
+    // `--docs` is injected but deliberately invisible: no agent calls it, and
+    // it would cost a line of every discovery response.
+    assert!(!help.to_string().contains("--docs"), "{help}");
+}
+
+#[test]
+fn command_help_answers_in_one_round_trip() {
     let scoped = run(&["slugify", "--help"]);
     assert!(scoped.status.success());
-    let scoped_event = stdout_json(&scoped);
-    let scoped_help = &scoped_event["result"]["help"];
-    assert_eq!(scoped_help["command_path"], "afslug slugify");
-    assert_eq!(scoped_help["inherited_arguments_from"], json!(["afslug"]));
+    let help = help_of(&scoped);
+    assert_eq!(help["command_path"], "afslug slugify");
+
+    let shapes = help["shapes"].as_array().expect("slugify has one shape");
+    assert_eq!(shapes.len(), 1);
+    let usage = shapes[0]["usage"].as_str().expect("usage is a string");
+
+    // Every optional argument is in this one answer. A second level could only
+    // omit them, leaving a caller that stopped here unable to know they exist.
+    for optional in [
+        "[--delimiter <CHAR>]",
+        "[--no-lowercase]",
+        "[--max-chars <N>]",
+        "[--fallback <SLUG>]",
+    ] {
+        assert!(usage.contains(optional), "{optional} missing from {usage}");
+    }
+    // A closed value set is spelled out, so the legal values are discoverable
+    // rather than reachable only by guessing and reading the error.
     assert!(
-        scoped_help["arguments"]
-            .as_array()
-            .expect("scoped arguments")
-            .iter()
-            .all(|argument| argument["name"] != "--output"),
-        "scoped structured help must not repeat inherited globals: {scoped_help}"
+        usage.contains("[--dots <replace|preserve|preserve-between-digits>]"),
+        "{usage}"
     );
+    assert_eq!(help["defaults"]["--charset"], "unicode-alphanumeric");
+}
 
-    let plain = run(&["slugify", "--help", "--output", "plain"]);
-    assert!(plain.status.success());
-    let plain_stdout = String::from_utf8(plain.stdout).expect("plain help is UTF-8");
-    assert!(plain_stdout.contains("Usage: afslug slugify"));
-    assert!(plain_stdout.contains("--output"));
+#[test]
+fn sibling_shapes_each_say_how_they_differ() {
+    let help = help_of(&run(&["skill", "install", "--help"]));
+    let shapes = help["shapes"].as_array().expect("two shapes");
+    assert_eq!(shapes.len(), 2);
 
-    let recursive = run(&["--help", "--recursive"]);
-    assert!(recursive.status.success());
-    let recursive_event = stdout_json(&recursive);
-    let recursive_help = &recursive_event["result"]["help"];
-    let (commands, arguments) = count_help_surface(recursive_help);
-    let budget = 512 + commands * 160 + arguments * 120;
+    let by_id = |id: &str| {
+        shapes
+            .iter()
+            .find(|shape| shape["id"] == id)
+            .unwrap_or_else(|| panic!("missing shape {id}: {help}"))
+            .clone()
+    };
+    let every = by_id("skill-install-every-agent");
+    let one = by_id("skill-install-one-agent");
+    assert_ne!(every["about"], one["about"]);
+    // --skills-dir names a single directory, so it belongs only to the shape
+    // that targets a single agent.
     assert!(
-        recursive.stdout.len() < budget,
-        "recursive help exceeded its payload budget: {} >= {budget}",
-        recursive.stdout.len()
+        !every["usage"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("--skills-dir"),
+        "{every}"
+    );
+    assert!(
+        one["usage"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("[--skills-dir <DIR>]"),
+        "{one}"
     );
 }
 
 #[test]
-fn missing_and_pseudo_help_commands_are_structured_errors() {
-    let missing = run(&[]);
-    assert_eq!(missing.status.code(), Some(2));
-    assert!(missing.stdout.is_empty());
-    let missing_event = stderr_json(&missing);
-    assert_eq!(missing_event["error"]["message"], "a command is required");
-    assert_eq!(missing_event["error"]["hint"], "try: afslug --help");
-    assert!(
-        missing.stderr.len() < 256,
-        "missing-command error embedded eager help"
-    );
+fn plain_help_is_not_weaker_than_the_structured_form() {
+    let plain = run(&["slugify", "--help", "--output", "plain"]);
+    assert!(plain.status.success());
+    let text = String::from_utf8(plain.stdout).expect("plain help is UTF-8");
 
+    assert!(text.contains("afslug slugify <TEXT>"), "{text}");
+    // Notes and defaults are the two things plain help used to drop.
+    assert!(text.contains("Text to slugify"), "{text}");
+    assert!(text.contains("--charset=unicode-alphanumeric"), "{text}");
+}
+
+#[test]
+fn an_unknown_command_names_itself() {
+    // `help` was clap's pseudo-command; the registry has no such thing.
     let pseudo = run(&["help"]);
     assert_eq!(pseudo.status.code(), Some(2));
     assert!(pseudo.stdout.is_empty());
-    assert_eq!(stderr_json(&pseudo)["kind"], "error");
+    let event = stderr_json(&pseudo);
+    assert_eq!(event["error"]["code"], "cli_unknown_command");
+    assert_eq!(event["error"]["message"], "unknown command `help`");
+    assert_eq!(
+        event["error"]["hint"],
+        "run `afslug --help` and choose one registered combination"
+    );
+    assert!(
+        pseudo.stderr.len() < 256,
+        "an unknown command must not embed eager help"
+    );
 }
 
 #[test]
-fn output_to_stdout_unifies_error_events() {
+fn output_to_is_honored_once_an_invocation_resolves() {
+    let resolved = run(&["validate", "bad/slug", "--output-to", "stdout"]);
+    assert_eq!(resolved.status.code(), Some(1));
+    assert!(resolved.stderr.is_empty());
+    assert_eq!(stdout_json(&resolved)["error"]["code"], "slug_error");
+}
+
+#[test]
+fn a_rejected_invocation_reports_on_the_diagnostic_stream() {
+    // `--output-to stdout` is part of the argv that failed to resolve, so there
+    // is no output contract to honor yet; the rejection cannot be routed by the
+    // request it is rejecting.
     let output = run(&["--output-to", "stdout"]);
     assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert_eq!(stderr_json(&output)["kind"], "error");
+}
+
+#[test]
+fn docs_render_the_whole_registry_as_markdown() {
+    let output = run(&["--docs"]);
+    assert!(output.status.success());
     assert!(output.stderr.is_empty());
-    assert_eq!(stdout_json(&output)["kind"], "error");
+    let text = String::from_utf8(output.stdout).expect("docs are UTF-8");
+
+    assert!(text.starts_with("# afslug CLI reference"), "{text:.80}");
+    for command in ["afslug slugify", "afslug validate", "afslug skill install"] {
+        assert!(
+            text.contains(command),
+            "{command} missing from the reference"
+        );
+    }
 }
 
 #[test]
