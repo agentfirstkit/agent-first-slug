@@ -4,7 +4,7 @@ use agent_first_data::skill::{
     self, SkillAction, SkillAgentSelection, SkillAsset, SkillOptions, SkillScope, SkillSpec,
 };
 use agent_first_data::{
-    ArgSpec, BuiltCliSpec, CliEmitter, CliOutcome, CliSpec, CliSpecError, CliValue, Combination,
+    ArgSpec, BoundOutcome, BuiltCliSpec, CliEmitter, CliSpec, CliSpecError, CliValue, Combination,
     CommandSpec, OutputFormat, OutputPlan, OutputSpec, OutputTo, ResolvedInvocation,
     build_afdata_cli, cli_error_event, cli_help_event, cli_parse_output, cli_version_event,
     render_cli_reference,
@@ -252,14 +252,14 @@ fn main() -> ExitCode {
     };
 
     match outcome {
-        CliOutcome::Run(invocation) => app.execute(&invocation),
+        BoundOutcome::Run(invocation) => invocation.run(),
         // `--docs` renders the whole registry as raw Markdown, so it carries no
         // format of its own and never becomes a protocol event.
-        CliOutcome::Docs(docs) => write_text(
+        BoundOutcome::Docs(docs) => write_text(
             &render_cli_reference(&cli),
             stream_of(docs.output_plan(), false),
         ),
-        CliOutcome::Help(help) => {
+        BoundOutcome::Help(help) => {
             let (format, output_to) = plan_output(help.output_plan());
             if format == OutputFormat::Plain {
                 write_text(&help.plain(), stream_of(help.output_plan(), false))
@@ -267,7 +267,7 @@ fn main() -> ExitCode {
                 emit_event(cli_help_event(&help), format, output_to, 0)
             }
         }
-        CliOutcome::Version(version) => {
+        BoundOutcome::Version(version) => {
             let (format, output_to) = plan_output(version.output_plan());
             emit_event(cli_version_event(&version), format, output_to, 0)
         }
@@ -294,6 +294,11 @@ fn stream_of(plan: &OutputPlan, is_error: bool) -> OutputTo {
     }
 }
 
+/// A value the matched shape declares as required or fixed.
+///
+/// Reading it cannot fail: the shape that matched supplies every id it
+/// declares. Asking for an id it does not declare is a defect in this file, not
+/// a value the caller omitted.
 fn invocation_string(invocation: &ResolvedInvocation, id: &str) -> String {
     invocation
         .required(id)
@@ -548,6 +553,8 @@ fn write_text(text: &str, output_to: OutputTo) -> ExitCode {
 
 #[cfg(test)]
 mod tests {
+    use agent_first_data::CliOutcome;
+
     use super::*;
 
     #[test]

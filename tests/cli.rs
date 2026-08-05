@@ -211,10 +211,10 @@ fn short_flags_do_not_exist() {
         let value = stderr_json(&output);
         assert_eq!(value["kind"], "error");
         assert_eq!(value["error"]["code"], "cli_unknown_argument");
-        assert_eq!(
-            value["error"]["message"],
-            format!("unknown argument `{short}`")
-        );
+        // The rejection classifies the token without quoting it back: the
+        // message is a fixed string, and `error.code` plus the hint are what
+        // the caller acts on.
+        assert_eq!(value["error"]["message"], "unknown short argument");
     }
 }
 
@@ -321,14 +321,16 @@ fn plain_help_is_not_weaker_than_the_structured_form() {
 }
 
 #[test]
-fn an_unknown_command_names_itself() {
-    // `help` was clap's pseudo-command; the registry has no such thing.
+fn an_unknown_command_is_rejected_without_quoting_it() {
+    // `help` was clap's pseudo-command; the registry has no such thing. The
+    // rejection classifies it without echoing the token back — `error.code` and
+    // the hint are what the caller acts on.
     let pseudo = run(&["help"]);
     assert_eq!(pseudo.status.code(), Some(2));
     assert!(pseudo.stdout.is_empty());
     let event = stderr_json(&pseudo);
     assert_eq!(event["error"]["code"], "cli_unknown_command");
-    assert_eq!(event["error"]["message"], "unknown command `help`");
+    assert_eq!(event["error"]["message"], "unknown command");
     assert_eq!(
         event["error"]["hint"],
         "run `afslug --help` and choose one registered combination"

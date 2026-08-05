@@ -2,7 +2,7 @@
   "$schema": "https://cmn.dev/schemas/v1/spore-core.json",
   "id": "agent-first-slug",
   "name": "Agent-First Slug",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "domain": "agentfirstkit.com",
   "key": "ed25519.BwbSzqdDYyMN1pPW5snRk3afrJAovHn8aueMvDpfNKVw",
   "synopsis": "Rust slug generation with explicit caller configuration for path and URL path segments.",
@@ -15,8 +15,8 @@
   ],
   "license": "MIT",
   "mutations": [
-    "Route --docs and plain help through the new agent-first-data write_raw instead of a private stdout/stderr dispatch, so stream routing comes from the crate that injects those outcomes rather than from a copy in this binary",
-    "Treat a closed reader as success: afslug --docs | head now exits 0 where the private copy returned a failure code"
+    "Upgrade to Agent-First Data 0.31.0 and bind resolved CLI actions directly, keeping invocation dispatch aligned with the current closed-world CLI runtime.",
+    "Stop echoing unknown command and short-argument values in structural CLI errors, preventing untrusted input from leaking into diagnostics."
   ],
   "bonds": [],
   "tree": {
