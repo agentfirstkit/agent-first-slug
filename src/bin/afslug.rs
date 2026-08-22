@@ -126,8 +126,14 @@ fn slugify_command() -> CommandSpec {
                 .about("Validation applied to the generated slug"),
         )
         .arg(
-            ArgSpec::option("--fallback", "SLUG")
-                .about("Slug substituted when the generated slug would otherwise be empty"),
+            ArgSpec::option("--fallback", "SLUG").about(
+                "Slug substituted when the generated slug would otherwise be empty; must satisfy the same character set, delimiter, dot, case and length rules",
+            ),
+        )
+        .arg(
+            ArgSpec::option("--fallback-verbatim", "SLUG").about(
+                "Same, inserted exactly as written for a value that must match something already stored; only the --validation surface is checked",
+            ),
         )
         .combination(
             Combination::new("slugify")
@@ -141,6 +147,7 @@ fn slugify_command() -> CommandSpec {
                     "dots",
                     "validation",
                     "fallback",
+                    "fallback_verbatim",
                 ])
                 .output(output()),
         )
@@ -364,9 +371,22 @@ fn run_slugify(invocation: &ResolvedInvocation) -> ExitCode {
         dot_handling_policy: dots_of(invocation),
         transliteration_policy: TransliterationPolicy::None,
         validation_policy: policy_of(invocation, "validation"),
-        empty_output_policy: match invocation_optional_string(invocation, "fallback") {
-            Some(fallback) => EmptyOutputPolicy::UseFallbackSlug(fallback),
-            None => EmptyOutputPolicy::KeepEmptySlug,
+        empty_output_policy: match (
+            invocation_optional_string(invocation, "fallback"),
+            invocation_optional_string(invocation, "fallback_verbatim"),
+        ) {
+            (Some(_), Some(_)) => {
+                return emit_error(
+                    "slug_error",
+                    "--fallback and --fallback-verbatim choose different rules for the same value; pass one",
+                    format,
+                    output_to,
+                    1,
+                );
+            }
+            (Some(fallback), None) => EmptyOutputPolicy::UseFallbackSlug(fallback),
+            (None, Some(fallback)) => EmptyOutputPolicy::UseVerbatimFallbackSlug(fallback),
+            (None, None) => EmptyOutputPolicy::KeepEmptySlug,
         },
     };
 

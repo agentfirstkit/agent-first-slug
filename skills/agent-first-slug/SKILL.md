@@ -6,7 +6,8 @@ description: Use agent-first-slug to generate deterministic Unicode slugs, local
 # Agent-First Slug
 
 Choose the Rust library when behavior must be configured or embedded in an
-application. Choose `afslug` for one-off generation with `SlugConfig::default()`.
+application. Choose `afslug` for a one-off with explicit configuration — it
+exposes every option except a runtime transliteration map.
 Do not invent downstream presets or silently change an existing identifier
 scheme; make compatibility-affecting rules explicit.
 
@@ -57,8 +58,28 @@ assert_eq!(slug, "ubuntu-16.04");
 - Slugify one segment at a time; never pass a full filesystem path or URL.
 - Treat the returned URL segment as raw UTF-8. Percent-encode it with a URL
   library's path-segment API before constructing the final URL.
-- A fallback is inserted verbatim and then validated; it is not lowercased or
-  truncated. Choose a fallback that already satisfies the target contract.
+- The `replacement_delimiter` must be a character the configuration filters
+  out. One the character set keeps, or that a dot policy preserves, or that
+  lowercasing changes, is refused before any input is read — it would otherwise
+  be indistinguishable from a character the caller typed, and two different
+  inputs could collapse to the same slug.
+- A fallback is inserted as written, not run through the pipeline, but
+  `UseFallbackSlug` requires it to satisfy the same character set, delimiter,
+  dot, case and length rules. Use `UseVerbatimFallbackSlug` (`--fallback-verbatim`)
+  only for a value that must match something already stored; it checks the
+  target surface and nothing else.
+- **A slug is not an identifier.** It carries no uniqueness, no authorization
+  and no atomic creation guarantee: different inputs legitimately produce the
+  same slug, and the default configuration can produce an empty one. When
+  uniqueness matters, allocate an authoritative ID and treat the slug as a
+  human-readable suffix; resolve collisions where the thing is created, not
+  here.
+- **Normalization is the caller's, and it is part of a stable-ID contract.**
+  Nothing here normalizes: canonically equivalent inputs — a precomposed `é`
+  against `e` plus a combining acute — produce different slugs, because the
+  combining mark is filtered and the letter is not. Normalize before calling if
+  stability across input methods matters, and record which form and which
+  Unicode version the stored slugs were generated under.
 - Changing delimiter, case, transliteration, dots, character set, or truncation
   can change stable identifiers. Report migration impact before changing stored
   or public slugs.

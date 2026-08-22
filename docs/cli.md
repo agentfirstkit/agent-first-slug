@@ -110,7 +110,7 @@ Arguments across every shape above:
 Generate a slug from input text.
 
 ```
-afslug slugify <TEXT> [--delimiter <CHAR>] [--no-lowercase] [--max-chars <N>] [--charset <unicode-alphanumeric|ascii-alphanumeric|unicode-letters-digits>] [--dots <replace|preserve|preserve-between-digits>] [--validation <none|local-path|url-path>] [--fallback <SLUG>]
+afslug slugify <TEXT> [--delimiter <CHAR>] [--no-lowercase] [--max-chars <N>] [--charset <unicode-alphanumeric|ascii-alphanumeric|unicode-letters-digits>] [--dots <replace|preserve|preserve-between-digits>] [--validation <none|local-path|url-path>] [--fallback <SLUG>] [--fallback-verbatim <SLUG>]
 ```
 
 | Argument | Meaning |
@@ -122,7 +122,8 @@ afslug slugify <TEXT> [--delimiter <CHAR>] [--no-lowercase] [--max-chars <N>] [-
 | `--charset` | Character set kept from the input after filtering |
 | `--dots` | How input dots are handled before other characters become delimiters |
 | `--validation` | Validation applied to the generated slug |
-| `--fallback` | Slug substituted when the generated slug would otherwise be empty |
+| `--fallback` | Slug substituted when the generated slug would otherwise be empty; must satisfy the same character set, delimiter, dot, case and length rules |
+| `--fallback-verbatim` | Same, inserted exactly as written for a value that must match something already stored; only the --validation surface is checked |
 
 ### `afslug validate`
 
@@ -153,4 +154,4 @@ Every structural failure emits one strict JSON `kind:"error"` event on stderr, l
 
 Two exit-1 codes describe the tool itself rather than the call: `cli_invocation_invalid` means the program misread its own resolved invocation — an unknown action id, or an argument id the selected combination cannot produce — and `output_setup_failed` means an output sink (`--stdout-file`, `--stderr-file`, stream redirection) could not be established. Both are defects to report, not inputs to correct; retrying the same command cannot help.
 
-Domain failures (exit 1) carry their own stable `error.code` instead, drawn from whatever this tool defines rather than from the `cli_*` set. No error message quotes a raw value it was given — an error event is routinely logged, and the input may hold secrets.
+Domain failures (exit 1) carry their own stable `error.code` instead, drawn from whatever this tool defines rather than from the `cli_*` set. Error events are routinely logged, so a message never quotes a value that came from an argument able to carry a credential — a header, a cookie, a token, a password, a proxy URL, an environment value, a form field. Such an error names the argument and the shape that was wrong, and stops there. A value that cannot be a secret — a path, a dot-path, a session name — is quoted, because an error that cannot say which one it means is not worth logging either.

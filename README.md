@@ -235,28 +235,75 @@ assert_eq!(slugify("Æther 東京", &config)?.slug, "aether-tokyo");
 
 ## Truncation And Empty Output
 
-`max_slug_chars` counts Unicode scalar values and runs after lowercasing; any
-trailing delimiter the cut exposes is then stripped. Empty handling runs after
-truncation, and a fallback is inserted verbatim — it is validated but is not
-lowercased or truncated.
+`max_slug_chars` counts Unicode scalar values; any trailing delimiter the cut
+exposes is then stripped. Empty handling runs after truncation.
+
+A fallback is inserted as written rather than run through the pipeline, but
+`UseFallbackSlug` still requires it to satisfy the same configuration —
+character set, delimiter, dot policy, case and length. A fallback that does not
+is a configuration error, not a slug: without that check an ASCII-only,
+length-capped configuration could return an arbitrary Unicode string and report
+it as validated. `UseVerbatimFallbackSlug` waives it for a value that has to
+match something already stored, and checks only the target surface.
 
 ```rust
-use agent_first_slug::{slugify, EmptyOutputPolicy, SlugConfig};
+use agent_first_slug::{slugify, EmptyOutputPolicy, SlugConfig, SlugError};
 
 let truncated = SlugConfig {
     max_slug_chars: Some(8),
     ..SlugConfig::default()
 };
-let fallback_after_truncation = SlugConfig {
-    max_slug_chars: Some(0),
-    empty_output_policy: EmptyOutputPolicy::UseFallbackSlug("fallback".to_string()),
+let fallback = SlugConfig {
+    max_slug_chars: Some(8),
+    empty_output_policy: EmptyOutputPolicy::UseFallbackSlug("untitled".to_string()),
+    ..SlugConfig::default()
+};
+let legacy = SlugConfig {
+    max_slug_chars: Some(8),
+    empty_output_policy: EmptyOutputPolicy::UseVerbatimFallbackSlug(
+        "Legacy Name".to_string(),
+    ),
     ..SlugConfig::default()
 };
 
 assert_eq!(slugify("Long Example", &truncated)?.slug, "long-exa");
-assert_eq!(slugify("Long Example", &fallback_after_truncation)?.slug, "fallback");
+assert_eq!(slugify("!!!", &fallback)?.slug, "untitled");
+assert_eq!(slugify("!!!", &legacy)?.slug, "Legacy Name");
+
+// Too long for this configuration's own budget, so it is refused rather than
+// returned as if it had been generated.
+let over_budget = SlugConfig {
+    empty_output_policy: EmptyOutputPolicy::UseFallbackSlug("far-too-long".to_string()),
+    ..fallback
+};
+assert!(matches!(
+    slugify("!!!", &over_budget),
+    Err(SlugError::FallbackViolatesConfig { .. })
+));
 # Ok::<(), agent_first_slug::SlugError>(())
 ```
+
+## What Changed, And What To Check Before Upgrading
+
+Two rules that affect generated slugs changed, because both let a configuration
+mean something other than what it said. If you have slugs already stored, run
+the old and new versions over your corpus and diff before upgrading.
+
+**Case mapping now runs before filtering.** It ran after, and Unicode case
+mapping is not one scalar for one scalar: `İ` lowercases to `i` plus a combining
+dot, and that dot ended up in the slug even though no character set here would
+have kept it. `İstanbul` was `i̇stanbul`; it is now `i-stanbul`. Only inputs
+whose case mapping expands are affected — every scalar in a slug is now one the
+character set admits, so `allowed_character_set` describes the output again.
+
+**A `replacement_delimiter` the configuration would keep is refused.** With `a`
+as the delimiter, `alpha beta` and `lpha beta` both produced `lphabet`: the run
+boundary was skipped because the output already ended in `a`, and the trim then
+ate real letters off real words. Configurations using `-`, `_`, `~` or any other
+character the filter removes are unaffected.
+
+Nothing normalizes input, then or now — see the skill for what that means for a
+stable-identifier contract.
 
 ## Validation Only
 

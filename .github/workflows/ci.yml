@@ -29,6 +29,22 @@ jobs:
             target
           key: ${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
 
+      # The runner images ship whatever ShellCheck their distribution packages
+      # — Ubuntu 24.04's is 0.9.0, two majors behind — and its rules differ from
+      # the pinned one's on real code. Provision the pin so this leg judges the
+      # tree by the same rules the local gate does.
+      - name: Setup ShellCheck
+        if: runner.os != 'Windows'
+        shell: bash
+        run: ./scripts/install-shellcheck.sh --install
+
+      # This spore has no shell scripts today, so the check reports that and
+      # passes. It is here for the day one appears: the monorepo gate would
+      # catch it, but this repository publishes on its own and would not.
+      - name: ShellCheck
+        shell: bash
+        run: ./scripts/install-shellcheck.sh --check .
+
       - name: Format
         run: cargo fmt --all --check
 
