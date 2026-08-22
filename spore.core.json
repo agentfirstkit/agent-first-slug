@@ -23,6 +23,7 @@
     "Upgrade Agent-First Data to 0.34.0 and refresh the dependency lock",
     "Run the pinned ShellCheck version in this repository's own CI, so shell scripts are judged by the same rules as the monorepo gate rather than by whatever the runner image ships",
     "Verify the release job is building the tag it was asked for, assert the built binary reports that tag's version, and upload release assets without ever replacing bytes already attached to the release",
+    "Publish the release checksum file in one canonical spelling on every platform, instead of letting Git Bash's binary-mode sha256sum write a line the upload refuses",
     "Pin the release matrix to explicit runner images instead of floating -latest labels"
   ],
   "bonds": [],
