@@ -126,6 +126,59 @@ fn slugify_validation_failure_is_a_structured_error() {
 }
 
 #[test]
+fn a_remedy_offered_here_is_one_a_command_line_can_type() {
+    // The library's own message named `UseVerbatimFallbackSlug`, which is a
+    // Rust path and not something an agent holding a command line can type.
+    // What is wrong is the library's to say; what to do about it belongs to
+    // whichever surface is being spoken to.
+    for (args, fragment) in [
+        (
+            vec![
+                "slugify",
+                "!!!",
+                "--charset",
+                "ascii-alphanumeric",
+                "--max-chars",
+                "8",
+                "--fallback",
+                "Ünïcode",
+            ],
+            "--fallback-verbatim",
+        ),
+        (
+            vec!["slugify", "hello world", "--delimiter", "a"],
+            "--delimiter",
+        ),
+    ] {
+        let output = run(&args);
+        assert_eq!(output.status.code(), Some(1), "{args:?}");
+        let error = stderr_json(&output)["error"].clone();
+        assert_eq!(error["code"], "slug_error", "{args:?}");
+
+        let hint = error["hint"].as_str().unwrap_or_default();
+        assert!(
+            hint.contains(fragment),
+            "{args:?}: hint must name the flag to reach for, got {hint:?}"
+        );
+
+        // A capital immediately after a lowercase letter is how a Rust
+        // identifier reads in prose and how nothing else does: English puts a
+        // space or a mark before a capital. No message that reaches a command
+        // line should contain one.
+        let message = error["message"].as_str().expect("a message");
+        let identifier = message
+            .chars()
+            .collect::<Vec<_>>()
+            .windows(2)
+            .any(|run| run[0].is_ascii_lowercase() && run[1].is_ascii_uppercase());
+        assert!(
+            !identifier,
+            "{args:?}: message reads like a Rust identifier, got {message:?}"
+        );
+    }
+}
+
+#[test]
 fn validate_accepts_a_valid_segment() {
     let output = run(&["validate", "my-slug", "--policy", "url-path"]);
 

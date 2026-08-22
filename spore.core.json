@@ -2,7 +2,7 @@
   "$schema": "https://cmn.dev/schemas/v1/spore-core.json",
   "id": "agent-first-slug",
   "name": "Agent-First Slug",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "domain": "agentfirstkit.com",
   "key": "ed25519.BwbSzqdDYyMN1pPW5snRk3afrJAovHn8aueMvDpfNKVw",
   "synopsis": "Rust slug generation with explicit caller configuration for path and URL path segments.",
@@ -15,16 +15,8 @@
   ],
   "license": "MIT",
   "mutations": [
-    "Run Unicode case mapping before character filtering, so every scalar in a slug is one the configured character set admits — `İstanbul` now slugs to `i-stanbul` instead of leaving a combining dot the filter would never have kept",
-    "Refuse a replacement_delimiter the same configuration would keep from the input, before any input is read, so two different inputs can no longer collapse to one slug and the trim can no longer eat real characters off real words",
-    "Require an EmptyOutputPolicy::UseFallbackSlug value to satisfy the configuration it stands in for — character set, delimiter, dot policy, case and length — instead of reporting an arbitrary string as validated",
-    "Add EmptyOutputPolicy::UseVerbatimFallbackSlug and the afslug slugify --fallback-verbatim flag for a fallback that must match an already-stored value, checking only the target surface; passing both fallback flags is an error",
-    "Document in the skill that a slug is not an identifier and that Unicode normalization is the caller's half of a stable-identifier contract, and add a README upgrade section naming both behavior changes for callers with stored slugs",
-    "Upgrade Agent-First Data to 0.34.0 and refresh the dependency lock",
-    "Run the pinned ShellCheck version in this repository's own CI, so shell scripts are judged by the same rules as the monorepo gate rather than by whatever the runner image ships",
-    "Verify the release job is building the tag it was asked for, assert the built binary reports that tag's version, and upload release assets without ever replacing bytes already attached to the release",
-    "Publish the release checksum file in one canonical spelling on every platform, instead of letting Git Bash's binary-mode sha256sum write a line the upload refuses",
-    "Pin the release matrix to explicit runner images instead of floating -latest labels"
+    "State only the violation in a slug error message and move the remedy into each surface's own diagnostic, so a caller holding a command line is told to pass --fallback-verbatim or a different --delimiter instead of to reach for a Rust enum variant it has no way to type",
+    "Emit slug errors with an AFDATA hint field naming the flag to reach for, matching the message/hint split the rest of the CLI already follows"
   ],
   "bonds": [],
   "tree": {

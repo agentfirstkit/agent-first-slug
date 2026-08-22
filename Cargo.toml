@@ -1,6 +1,6 @@
 [package]
 name = "agent-first-slug"
-version = "0.7.0"
+version = "0.7.1"
 edition = "2024"
 description = "Rust slug generation with explicit caller configuration for path and URL path segments."
 license = "MIT"

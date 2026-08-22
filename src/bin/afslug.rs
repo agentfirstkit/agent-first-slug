@@ -10,7 +10,7 @@ use agent_first_data::{
     render_cli_reference,
 };
 use agent_first_slug::{
-    AllowedCharacterSet, DotHandlingPolicy, EmptyOutputPolicy, SlugConfig, SlugResult,
+    AllowedCharacterSet, DotHandlingPolicy, EmptyOutputPolicy, SlugConfig, SlugError, SlugResult,
     SlugValidationPolicy, TransliterationPolicy, slugify, validate_slug,
 };
 use serde_json::{Value, json};
@@ -392,7 +392,7 @@ fn run_slugify(invocation: &ResolvedInvocation) -> ExitCode {
 
     match slugify(&invocation_string(invocation, "input"), &config) {
         Ok(result) => emit_slug_result(&result, format, output_to),
-        Err(error) => emit_error("slug_error", &error.to_string(), format, output_to, 1),
+        Err(error) => emit_slug_error(&error, format, output_to),
     }
 }
 
@@ -405,7 +405,7 @@ fn run_validate(invocation: &ResolvedInvocation) -> ExitCode {
             format,
             output_to,
         ),
-        Err(error) => emit_error("slug_error", &error.to_string(), format, output_to, 1),
+        Err(error) => emit_slug_error(&error, format, output_to),
     }
 }
 
@@ -509,6 +509,34 @@ fn emit_result(value: Value, format: OutputFormat, output_to: OutputTo) -> ExitC
     match emitter.emit_result(value) {
         Ok(()) => ExitCode::SUCCESS,
         Err(_) => ExitCode::from(4),
+    }
+}
+
+/// Report a library error in this surface's own vocabulary.
+///
+/// The message states what was wrong and is the library's; the remedy is a
+/// thing the caller can type, so it belongs to whoever is being spoken to. A
+/// Rust caller reaches for `EmptyOutputPolicy::UseVerbatimFallbackSlug`, and
+/// naming that in the shared message would tell an agent holding a command
+/// line to type something no command line has.
+fn emit_slug_error(error: &SlugError, format: OutputFormat, output_to: OutputTo) -> ExitCode {
+    let message = error.to_string();
+    match slug_error_hint(error) {
+        Some(hint) => emit_error_with_hint("slug_error", &message, hint, format, output_to, 1),
+        None => emit_error("slug_error", &message, format, output_to, 1),
+    }
+}
+
+fn slug_error_hint(error: &SlugError) -> Option<&'static str> {
+    match error {
+        SlugError::FallbackViolatesConfig { .. } => Some(
+            "pass a --fallback this configuration could itself have produced, \
+             or --fallback-verbatim to insert the value as written",
+        ),
+        SlugError::AmbiguousReplacementDelimiter { .. } => {
+            Some("pass a --delimiter this configuration filters out, such as `-` or `_`")
+        }
+        _ => None,
     }
 }
 

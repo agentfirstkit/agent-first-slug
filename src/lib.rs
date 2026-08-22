@@ -138,12 +138,23 @@ pub enum SlugError {
     UrlPathSegmentReservedCharacter { character: char },
     /// A [`EmptyOutputPolicy::UseFallbackSlug`] value does not satisfy the
     /// configuration that produced the slug it replaces.
+    ///
+    /// Either choose a fallback the configuration could itself have produced,
+    /// or say the value is exempt with
+    /// [`EmptyOutputPolicy::UseVerbatimFallbackSlug`]. That remedy is named
+    /// here rather than in the message, because the message is also read by
+    /// callers who reach this crate through something other than its Rust API
+    /// and have no such name to type.
     FallbackViolatesConfig {
         /// Which rule it broke.
         reason: &'static str,
     },
     /// The replacement delimiter is a character this configuration would also
     /// keep from the input, so the two could not be told apart.
+    ///
+    /// Choose one the filter removes, such as `-` or `_`. Like the fallback
+    /// above, the remedy lives here and in each surface's own diagnostics
+    /// rather than in the message every surface shares.
     AmbiguousReplacementDelimiter {
         /// The configured delimiter.
         delimiter: char,
@@ -167,11 +178,11 @@ impl fmt::Display for SlugError {
             }
             Self::FallbackViolatesConfig { reason } => write!(
                 f,
-                "fallback slug does not satisfy this configuration: {reason}; fix it, or use UseVerbatimFallbackSlug to insert it as written"
+                "fallback slug does not satisfy this configuration: {reason}"
             ),
             Self::AmbiguousReplacementDelimiter { delimiter, reason } => write!(
                 f,
-                "replacement delimiter `{delimiter}` is ambiguous: {reason}; pick one this configuration filters out, such as `-` or `_`"
+                "replacement delimiter `{delimiter}` is ambiguous: {reason}"
             ),
             Self::PathSegmentControlCharacter { character } => {
                 write!(
