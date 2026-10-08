@@ -115,6 +115,152 @@ fn slugify_substitutes_fallback_for_empty_output() {
 }
 
 #[test]
+fn slugify_keeps_combining_marks_whole_only_under_the_marks_charset() {
+    for (charset, expected) in [
+        ("unicode-alphanumeric", "नमस-ते-ไม-ใช"),
+        ("unicode-letters-digits", "नमस-त-ไม-ใช"),
+        ("unicode-letters-marks-digits", "नमस्ते-ไม่ใช่"),
+    ] {
+        let output = run(&["slugify", "नमस्ते ไม่ใช่", "--charset", charset]);
+        assert!(output.status.success(), "{charset}");
+        assert!(output.stderr.is_empty(), "{charset}");
+        assert_eq!(
+            stdout_json(&output)["result"]["slug"],
+            expected,
+            "{charset}"
+        );
+    }
+}
+
+#[test]
+fn slugify_holds_a_fallback_to_the_single_delimiter_rule() {
+    // A generated slug never repeats its delimiter, so a fallback that does is
+    // not one this configuration could have produced.
+    let rejected = run(&["slugify", "!!!", "--fallback", "a--b"]);
+    assert_eq!(rejected.status.code(), Some(1));
+    assert!(rejected.stdout.is_empty());
+    let error = stderr_json(&rejected)["error"].clone();
+    assert_eq!(error["code"], "slug_error");
+    assert_eq!(
+        error["message"],
+        "fallback slug does not satisfy this configuration: \
+         a generated slug never repeats the replacement delimiter"
+    );
+    assert_eq!(
+        error["hint"],
+        "pass a --fallback this configuration could itself have produced, \
+         or --fallback-verbatim to insert the value as written"
+    );
+
+    let verbatim = run(&["slugify", "!!!", "--fallback-verbatim", "a--b"]);
+    assert!(verbatim.status.success());
+    assert!(verbatim.stderr.is_empty());
+    assert_eq!(stdout_json(&verbatim)["result"]["slug"], "a--b");
+
+    let single = run(&["slugify", "!!!", "--fallback", "a-b"]);
+    assert!(single.status.success());
+    assert!(single.stderr.is_empty());
+    assert_eq!(stdout_json(&single)["result"]["slug"], "a-b");
+}
+
+#[test]
+fn slugify_substitutes_verbatim_fallback_for_empty_output() {
+    let output = run(&[
+        "slugify",
+        "!!!",
+        "--charset",
+        "ascii-alphanumeric",
+        "--max-chars",
+        "3",
+        "--validation",
+        "url-path",
+        "--fallback-verbatim",
+        "Stored.Name",
+    ]);
+
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    assert_eq!(stdout_json(&output)["result"]["slug"], "Stored.Name");
+}
+
+#[test]
+fn slugify_rejects_both_fallback_rules_before_execution() {
+    for args in [
+        vec![
+            "slugify",
+            "!!!",
+            "--fallback",
+            "item",
+            "--fallback-verbatim",
+            "Stored.Name",
+            "--output",
+            "yaml",
+            "--output-to",
+            "stdout",
+        ],
+        vec![
+            "slugify",
+            "already-slug",
+            "--fallback-verbatim",
+            "Stored.Name",
+            "--fallback",
+            "item",
+        ],
+    ] {
+        let output = run(&args);
+
+        assert_eq!(output.status.code(), Some(2), "{args:?}");
+        assert!(output.stdout.is_empty(), "{args:?}");
+        let event = stderr_json(&output);
+        assert_eq!(event["kind"], "error", "{args:?}");
+        assert_eq!(
+            event["error"]["code"], "cli_unregistered_combination",
+            "{args:?}"
+        );
+        assert_eq!(event["error"]["retryable"], false, "{args:?}");
+        assert_eq!(event["trace"], json!({}), "{args:?}");
+    }
+}
+
+#[test]
+fn slugify_invalid_values_ignore_requested_format_and_destination() {
+    for args in [
+        vec![
+            "slugify",
+            "hello",
+            "--delimiter",
+            "xx",
+            "--output",
+            "yaml",
+            "--output-to",
+            "stdout",
+        ],
+        vec![
+            "slugify",
+            "hello",
+            "--max-chars",
+            "-1",
+            "--output",
+            "plain",
+            "--output-to",
+            "stdout",
+        ],
+    ] {
+        let output = run(&args);
+        assert_eq!(output.status.code(), Some(2), "{args:?}");
+        assert!(output.stdout.is_empty(), "{args:?}");
+        let event = stderr_json(&output);
+        assert_eq!(event["kind"], "error", "{args:?}");
+        assert_eq!(
+            event["error"]["code"], "cli_invalid_argument_value",
+            "{args:?}"
+        );
+        assert_eq!(event["error"]["retryable"], false, "{args:?}");
+        assert_eq!(event["trace"], json!({}), "{args:?}");
+    }
+}
+
+#[test]
 fn slugify_validation_failure_is_a_structured_error() {
     // Punctuation-only input yields an empty slug, which is not a valid URL segment.
     let output = run(&["slugify", "!!!", "--validation", "url-path"]);
@@ -304,26 +450,52 @@ fn command_help_answers_in_one_round_trip() {
     let help = help_of(&scoped);
     assert_eq!(help["command_path"], "afslug slugify");
 
-    let shapes = help["shapes"].as_array().expect("slugify has one shape");
-    assert_eq!(shapes.len(), 1);
-    let usage = shapes[0]["usage"].as_str().expect("usage is a string");
-
-    // Every optional argument is in this one answer. A second level could only
-    // omit them, leaving a caller that stopped here unable to know they exist.
-    for optional in [
-        "[--delimiter <CHAR>]",
-        "[--no-lowercase]",
-        "[--max-chars <N>]",
-        "[--fallback <SLUG>]",
+    let shapes = help["shapes"].as_array().expect("slugify has three shapes");
+    assert_eq!(shapes.len(), 3);
+    for (id, fallback) in [
+        ("slugify", None),
+        ("slugify-fallback", Some("--fallback <SLUG>")),
+        (
+            "slugify-fallback-verbatim",
+            Some("--fallback-verbatim <SLUG>"),
+        ),
     ] {
-        assert!(usage.contains(optional), "{optional} missing from {usage}");
+        let shape = shapes
+            .iter()
+            .find(|shape| shape["id"] == id)
+            .unwrap_or_else(|| panic!("missing shape {id}: {help}"));
+        let usage = shape["usage"].as_str().expect("usage is a string");
+        assert!(usage.starts_with("afslug slugify <TEXT>"), "{usage}");
+        assert!(
+            shape["about"]
+                .as_str()
+                .is_some_and(|about| !about.is_empty())
+        );
+
+        // Each shape is complete, including closed value sets, in this one
+        // answer rather than requiring a second discovery call.
+        for optional in [
+            "[--delimiter <CHAR>]",
+            "[--no-lowercase]",
+            "[--max-chars <N>]",
+            "[--charset <unicode-alphanumeric|ascii-alphanumeric|unicode-letters-digits|unicode-letters-marks-digits>]",
+            "[--dots <replace|preserve|preserve-between-digits>]",
+            "[--validation <none|local-path|url-path>]",
+        ] {
+            assert!(usage.contains(optional), "{optional} missing from {usage}");
+        }
+        for option in ["--fallback <SLUG>", "--fallback-verbatim <SLUG>"] {
+            if fallback == Some(option) {
+                assert!(usage.contains(option), "{option} missing from {usage}");
+                assert!(
+                    !usage.contains(&format!("[{option}]")),
+                    "{option} must be required in {usage}"
+                );
+            } else {
+                assert!(!usage.contains(option), "{option} is excluded from {usage}");
+            }
+        }
     }
-    // A closed value set is spelled out, so the legal values are discoverable
-    // rather than reachable only by guessing and reading the error.
-    assert!(
-        usage.contains("[--dots <replace|preserve|preserve-between-digits>]"),
-        "{usage}"
-    );
     assert_eq!(help["defaults"]["--charset"], "unicode-alphanumeric");
 }
 

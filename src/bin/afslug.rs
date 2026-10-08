@@ -81,6 +81,14 @@ fn cli_spec() -> Result<BuiltCliSpec, CliSpecError> {
 }
 
 fn slugify_command() -> CommandSpec {
+    let common_options = [
+        "delimiter",
+        "no_lowercase",
+        "max_chars",
+        "charset",
+        "dots",
+        "validation",
+    ];
     // Transliteration is intentionally absent: its policy carries a `'static`
     // replacement map that a CLI cannot build from runtime input, so callers who
     // need it reach for the library.
@@ -107,6 +115,7 @@ fn slugify_command() -> CommandSpec {
                     "unicode-alphanumeric",
                     "ascii-alphanumeric",
                     "unicode-letters-digits",
+                    "unicode-letters-marks-digits",
                 ],
             )
             .value_name("CHARSET")
@@ -138,17 +147,25 @@ fn slugify_command() -> CommandSpec {
         .combination(
             Combination::new("slugify")
                 .action("slugify")
+                .about("Keep an empty slug when filtering removes every character")
                 .required(["input"])
-                .optional([
-                    "delimiter",
-                    "no_lowercase",
-                    "max_chars",
-                    "charset",
-                    "dots",
-                    "validation",
-                    "fallback",
-                    "fallback_verbatim",
-                ])
+                .optional(common_options)
+                .output(output()),
+        )
+        .combination(
+            Combination::new("slugify-fallback")
+                .action("slugify")
+                .about("Replace an empty slug with a fallback that satisfies the configuration")
+                .required(["input", "fallback"])
+                .optional(common_options)
+                .output(output()),
+        )
+        .combination(
+            Combination::new("slugify-fallback-verbatim")
+                .action("slugify")
+                .about("Replace an empty slug with a stored value, checking only path validation")
+                .required(["input", "fallback_verbatim"])
+                .optional(common_options)
                 .output(output()),
         )
 }
@@ -342,8 +359,8 @@ fn run_slugify(invocation: &ResolvedInvocation) -> ExitCode {
             "cli_invalid_argument_value",
             "--delimiter must be exactly one character",
             "pass a single character, for example --delimiter -",
-            format,
-            output_to,
+            OutputFormat::Json,
+            OutputTo::Stderr,
             2,
         );
     };
@@ -356,8 +373,8 @@ fn run_slugify(invocation: &ResolvedInvocation) -> ExitCode {
                 "cli_invalid_argument_value",
                 "--max-chars must not be negative",
                 "pass zero or a positive count",
-                format,
-                output_to,
+                OutputFormat::Json,
+                OutputTo::Stderr,
                 2,
             );
         }
@@ -371,22 +388,14 @@ fn run_slugify(invocation: &ResolvedInvocation) -> ExitCode {
         dot_handling_policy: dots_of(invocation),
         transliteration_policy: TransliterationPolicy::None,
         validation_policy: policy_of(invocation, "validation"),
-        empty_output_policy: match (
-            invocation_optional_string(invocation, "fallback"),
-            invocation_optional_string(invocation, "fallback_verbatim"),
-        ) {
-            (Some(_), Some(_)) => {
-                return emit_error(
-                    "slug_error",
-                    "--fallback and --fallback-verbatim choose different rules for the same value; pass one",
-                    format,
-                    output_to,
-                    1,
-                );
-            }
-            (Some(fallback), None) => EmptyOutputPolicy::UseFallbackSlug(fallback),
-            (None, Some(fallback)) => EmptyOutputPolicy::UseVerbatimFallbackSlug(fallback),
-            (None, None) => EmptyOutputPolicy::KeepEmptySlug,
+        empty_output_policy: if let Some(fallback) =
+            invocation_optional_string(invocation, "fallback")
+        {
+            EmptyOutputPolicy::UseFallbackSlug(fallback)
+        } else if let Some(fallback) = invocation_optional_string(invocation, "fallback_verbatim") {
+            EmptyOutputPolicy::UseVerbatimFallbackSlug(fallback)
+        } else {
+            EmptyOutputPolicy::KeepEmptySlug
         },
     };
 
@@ -413,6 +422,9 @@ fn charset_of(invocation: &ResolvedInvocation) -> AllowedCharacterSet {
     match invocation_optional_string(invocation, "charset").as_deref() {
         Some("ascii-alphanumeric") => AllowedCharacterSet::AsciiAlphanumericCharacters,
         Some("unicode-letters-digits") => AllowedCharacterSet::UnicodeLettersAndDecimalDigits,
+        Some("unicode-letters-marks-digits") => {
+            AllowedCharacterSet::UnicodeLettersMarksAndDecimalDigits
+        }
         _ => AllowedCharacterSet::UnicodeAlphanumericCharacters,
     }
 }

@@ -38,9 +38,7 @@ jobs:
         shell: bash
         run: ./scripts/install-shellcheck.sh --install
 
-      # This spore has no shell scripts today, so the check reports that and
-      # passes. It is here for the day one appears: the monorepo gate would
-      # catch it, but this repository publishes on its own and would not.
+      # Check the installer and release scripts in scripts/ for this standalone repository.
       - name: ShellCheck
         shell: bash
         run: ./scripts/install-shellcheck.sh --check .
@@ -51,8 +49,14 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
 
+      - name: Clippy without default features
+        run: cargo clippy --all-targets --no-default-features -- -D warnings
+
       - name: Unit
         run: cargo test --lib --tests
+
+      - name: Unit without default features
+        run: cargo test --no-default-features
 
       # This crate's examples live in doc comments (the README is the crate doc);
       # gate them so they cannot rot.
@@ -87,3 +91,6 @@ jobs:
 
       - name: Unit suites
         run: cargo test --lib --tests
+
+      - name: Unit suites without default features
+        run: cargo test --no-default-features

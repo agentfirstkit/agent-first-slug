@@ -1,12 +1,12 @@
 ---
 name: agent-first-slug
-description: Use agent-first-slug to generate deterministic Unicode slugs, local filesystem path segments, or URL path segments from Rust, and use the afslug CLI for one-off default slug generation with AFDATA JSON/YAML/plain output. Trigger when adding, reviewing, migrating, or validating slug, filename-segment, route-segment, dot-handling, transliteration, truncation, or empty-output behavior.
+description: Use agent-first-slug to generate deterministic Unicode slugs, local filesystem path segments, or URL path segments from Rust, and use the afslug CLI for one-off generation with explicit configuration and AFDATA JSON/YAML/plain output. Trigger when adding, reviewing, migrating, or validating slug, filename-segment, route-segment, dot-handling, transliteration, truncation, or empty-output behavior.
 ---
 
 # Agent-First Slug
 
-Choose the Rust library when behavior must be configured or embedded in an
-application. Choose `afslug` for a one-off with explicit configuration — it
+Choose the Rust library for embedded behavior or a static transliteration map.
+Choose `afslug` for a one-off with explicit configuration — it
 exposes every option except a runtime transliteration map.
 Do not invent downstream presets or silently change an existing identifier
 scheme; make compatibility-affecting rules explicit.
@@ -33,6 +33,14 @@ For a local path or URL path segment, construct every `SlugConfig` field at the
 call site. Select the character set, dot policy, truncation, empty-output
 policy, and validation policy deliberately. Transliteration is a caller-owned
 static replacement map; the library does not guess a language or legacy mode.
+For text in a script that writes vowels, viramas, or tones as combining marks
+(Thai, Lao, Devanagari, Tamil, ...), choose `UnicodeLettersMarksAndDecimalDigits`
+(`--charset unicode-letters-marks-digits`). The other sets split those words:
+`UnicodeLettersAndDecimalDigits` drops every mark, and the default
+`UnicodeAlphanumericCharacters` keeps most vowel signs but not viramas or tone
+marks.
+Patterns must be nonempty and unique; even identical repeated entries are
+configuration errors. Unique overlapping patterns use the longest match.
 
 ```rust
 use agent_first_slug::{
@@ -76,8 +84,8 @@ assert_eq!(slug, "ubuntu-16.04");
   here.
 - **Normalization is the caller's, and it is part of a stable-ID contract.**
   Nothing here normalizes: canonically equivalent inputs — a precomposed `é`
-  against `e` plus a combining acute — produce different slugs, because the
-  combining mark is filtered and the letter is not. Normalize before calling if
+  against `e` plus a combining acute — produce different slugs, whether the
+  set filters the mark (a split word) or keeps it (different scalars). Normalize before calling if
   stability across input methods matters, and record which form and which
   Unicode version the stored slugs were generated under.
 - Changing delimiter, case, transliteration, dots, character set, or truncation

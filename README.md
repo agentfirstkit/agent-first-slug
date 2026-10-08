@@ -38,7 +38,7 @@ afslug slugify "Hello, 世界!"
 # {"kind":"result","result":{"changed_from_input":true,"code":"slugify","slug":"hello-世界"},"trace":{}}
 
 afslug slugify "Hello, World!" --output plain
-# kind=result result.changed_from_input=true result.code=slugify result.slug=hello-world
+# kind=result result.changed_from_input=true result.code=slugify result.slug=hello-world trace={}
 
 afslug validate "my-slug" --policy url-path
 ```
@@ -52,7 +52,7 @@ library-only: its static replacement map cannot be built from CLI arguments.
 ## Agent Skill
 
 Use [`skills/agent-first-slug/SKILL.md`](skills/agent-first-slug/SKILL.md) to
-teach a coding agent when to choose the Rust library or the default-only
+teach a coding agent when to choose the Rust library or the explicitly configured
 `afslug` CLI, and how to preserve stable identifier behavior.
 
 ## Default Unicode Slugs
@@ -162,6 +162,8 @@ Requirements for this target:
 - Reject `/`, `?`, `#`, raw `%`, Unicode whitespace, controls, and `\\`.
 - Reject `.` and `..` for route safety.
 - Preserve dots between decimal digits if version numbers matter.
+- For scripts that write vowels, viramas, or tones as combining marks, choose
+  `UnicodeLettersMarksAndDecimalDigits`; see [Combining Marks](#combining-marks).
 - Do not manually concatenate unescaped slugs into URLs.
 
 ```rust
@@ -187,6 +189,32 @@ assert_eq!(slugify(".18 increased ! ", &config)?.slug, "18-increased");
 assert_eq!(slugify("お元気ですか？", &config)?.slug, "お元気ですか");
 # Ok::<(), agent_first_slug::SlugError>(())
 ```
+
+## Combining Marks
+
+Thai, Lao, Devanagari, Tamil and many other scripts write vowels, viramas, or
+tones as combining marks after a base letter. Only
+`UnicodeLettersMarksAndDecimalDigits` keeps those words whole.
+`UnicodeLettersAndDecimalDigits` turns every mark into a delimiter, and the
+default `UnicodeAlphanumericCharacters` keeps the marks Unicode calls
+alphabetic — most vowel signs — but still splits at viramas and tone marks.
+
+```rust
+use agent_first_slug::{slugify, AllowedCharacterSet, SlugConfig};
+
+let marks = SlugConfig {
+    allowed_character_set: AllowedCharacterSet::UnicodeLettersMarksAndDecimalDigits,
+    ..SlugConfig::default()
+};
+
+assert_eq!(slugify("नमस्ते ไม่ใช่", &marks)?.slug, "नमस्ते-ไม่ใช่");
+assert_eq!(slugify("नमस्ते ไม่ใช่", &SlugConfig::default())?.slug, "नमस-ते-ไม-ใช");
+# Ok::<(), agent_first_slug::SlugError>(())
+```
+
+A mark is kept only where it completes a kept character. One with nothing kept
+before it — at the start, after a delimiter, after a dot — is filtered like any
+other character, so a slug never begins with a stray mark.
 
 ## Dot Handling
 
@@ -215,7 +243,9 @@ assert_eq!(slugify("T.U.S.F.G.E.3.0.8", &preserve_version_dots)?.slug, "t-u-s-f-
 ## Transliteration
 
 Transliteration is caller-provided, so legacy behavior can be expressed without a
-named preset in the library.
+named preset in the library. Patterns must be nonempty and unique, even when
+duplicate patterns name the same replacement. Invalid maps are refused even
+for empty input; unique overlapping patterns still use the longest match.
 
 ```rust
 use agent_first_slug::{
@@ -235,8 +265,11 @@ assert_eq!(slugify("Æther 東京", &config)?.slug, "aether-tokyo");
 
 ## Truncation And Empty Output
 
-`max_slug_chars` counts Unicode scalar values; any trailing delimiter the cut
-exposes is then stripped. Empty handling runs after truncation.
+`max_slug_chars` counts Unicode scalar values. A cut never separates a kept
+character from the combining marks after it — that character is dropped whole —
+and any trailing delimiter the cut exposes is then stripped, including a
+trailing dot under `PreserveDotsBetweenDecimalDigits`. Empty handling runs
+after truncation.
 
 A fallback is inserted as written rather than run through the pipeline, but
 `UseFallbackSlug` still requires it to satisfy the same configuration —
@@ -285,24 +318,24 @@ assert!(matches!(
 
 ## What Changed, And What To Check Before Upgrading
 
-Two rules that affect generated slugs changed, because both let a configuration
-mean something other than what it said. If you have slugs already stored, run
-the old and new versions over your corpus and diff before upgrading.
+Three rules that can change stored slugs or reject a configuration changed in
+0.8. If you have slugs already stored, run the old and new versions over your
+corpus and diff before upgrading.
 
-**Case mapping now runs before filtering.** It ran after, and Unicode case
-mapping is not one scalar for one scalar: `İ` lowercases to `i` plus a combining
-dot, and that dot ended up in the slug even though no character set here would
-have kept it. `İstanbul` was `i̇stanbul`; it is now `i-stanbul`. Only inputs
-whose case mapping expands are affected — every scalar in a slug is now one the
-character set admits, so `allowed_character_set` describes the output again.
+**Truncation no longer leaves a broken tail.** A cut that exposed a trailing
+dot under `PreserveDotsBetweenDecimalDigits` kept it (`version 1.2.3` at ten
+scalars was `version-1.`, now `version-1`), and a cut between a character and
+its combining marks kept the bare base (`नमस्ते` at five scalars was `नमस-त`,
+now `नमस`).
 
-**A `replacement_delimiter` the configuration would keep is refused.** With `a`
-as the delimiter, `alpha beta` and `lpha beta` both produced `lphabet`: the run
-boundary was skipped because the output already ended in `a`, and the trim then
-ate real letters off real words. Configurations using `-`, `_`, `~` or any other
-character the filter removes are unaffected.
+**Repeated transliteration patterns are refused**
+(`SlugError::DuplicateTransliterationPattern`), even when both entries name the
+same replacement, and even for empty input.
 
-Nothing normalizes input, then or now — see the skill for what that means for a
+**A fallback that repeats the delimiter is refused** under `UseFallbackSlug`,
+because the pipeline never produces one.
+
+Nothing normalizes input — see the skill for what that means for a
 stable-identifier contract.
 
 ## Validation Only

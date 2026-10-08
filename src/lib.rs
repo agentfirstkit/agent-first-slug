@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 
 use std::borrow::Cow;
+use std::collections::BTreeSet;
 use std::fmt;
 
 use unicode_general_category::{GeneralCategory, get_general_category};
@@ -11,15 +12,15 @@ use unicode_general_category::{GeneralCategory, get_general_category};
 pub struct SlugConfig {
     /// Character inserted for each run of filtered input characters.
     pub replacement_delimiter: char,
-    /// Lowercase the generated slug after delimiter trimming.
+    /// Lowercase transliterated input before character filtering.
     pub lowercase_enabled: bool,
     /// Maximum number of Unicode scalar values to keep after lowercasing.
     pub max_slug_chars: Option<usize>,
-    /// Character set kept from the input after transliteration.
+    /// Character set kept after transliteration and optional lowercasing.
     pub allowed_character_set: AllowedCharacterSet,
     /// How dots are handled before other filtered characters become delimiters.
     pub dot_handling_policy: DotHandlingPolicy,
-    /// Optional transliteration applied before character filtering.
+    /// Optional transliteration applied before lowercasing and character filtering.
     pub transliteration_policy: TransliterationPolicy,
     /// Optional validation applied after empty-output handling.
     pub validation_policy: SlugValidationPolicy,
@@ -45,12 +46,22 @@ impl Default for SlugConfig {
 /// Character sets that can pass through the slug filter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AllowedCharacterSet {
-    /// Rust's Unicode alphanumeric predicate.
+    /// Rust's Unicode alphanumeric predicate. It keeps the combining marks that
+    /// carry the Unicode `Alphabetic` property — most dependent vowel signs —
+    /// and filters the rest, so viramas and tone marks still split a word.
     UnicodeAlphanumericCharacters,
     /// ASCII letters and digits only.
     AsciiAlphanumericCharacters,
-    /// Unicode letter categories plus Unicode decimal digits.
+    /// Unicode letter categories plus Unicode decimal digits. Every combining
+    /// mark becomes a delimiter, so scripts that write vowels, viramas, or tones
+    /// as marks are split mid-word.
     UnicodeLettersAndDecimalDigits,
+    /// [`Self::UnicodeLettersAndDecimalDigits`] plus combining marks (Mn, Mc,
+    /// Me) that follow a kept character, so `ไม่ใช่`, `नमस्ते`, and `தமிழ்` stay
+    /// whole. A mark with nothing kept before it is filtered like any other
+    /// character, so a slug never begins with one or carries one after a
+    /// delimiter or a dot.
+    UnicodeLettersMarksAndDecimalDigits,
 }
 
 /// Dot handling before all other filtered characters become delimiters.
@@ -64,14 +75,15 @@ pub enum DotHandlingPolicy {
     PreserveDotsBetweenDecimalDigits,
 }
 
-/// Transliteration applied before character filtering.
+/// Transliteration applied before lowercasing and character filtering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransliterationPolicy {
     /// Do not transliterate.
     None,
     /// Replace static string patterns with static replacement strings. At each
     /// position the longest matching pattern wins, so pattern order in the slice
-    /// does not matter.
+    /// does not matter. Empty or repeated patterns are rejected before the input
+    /// is processed, including repetitions with the same replacement.
     StaticReplacementMap(&'static [(&'static str, &'static str)]),
 }
 
@@ -124,6 +136,8 @@ pub struct SlugResult {
 pub enum SlugError {
     /// A static transliteration map contains an empty pattern.
     EmptyTransliterationPattern,
+    /// A static transliteration map repeats a pattern, even with the same replacement.
+    DuplicateTransliterationPattern,
     /// A path segment cannot be empty.
     EmptyPathSegment,
     /// A path segment cannot contain `/` or `\`.
@@ -169,6 +183,9 @@ impl fmt::Display for SlugError {
             Self::EmptyTransliterationPattern => {
                 write!(f, "transliteration patterns must not be empty")
             }
+            Self::DuplicateTransliterationPattern => {
+                write!(f, "transliteration patterns must be unique")
+            }
             Self::EmptyPathSegment => write!(f, "path segment must not be empty"),
             Self::PathSegmentSeparator { character } => {
                 write!(f, "path segment must not contain separator `{character}`")
@@ -208,14 +225,16 @@ impl std::error::Error for SlugError {}
 ///
 /// 1. Reject a `replacement_delimiter` this configuration could not tell apart
 ///    from an input character.
-/// 2. Apply [`TransliterationPolicy`].
+/// 2. Reject empty or repeated transliteration patterns, then apply
+///    [`TransliterationPolicy`]. Empty patterns take precedence over repetitions.
 /// 3. Lowercase if `lowercase_enabled` is `true`.
 /// 4. Walk characters left-to-right.
 /// 5. Keep characters allowed by [`AllowedCharacterSet`].
 /// 6. Apply [`DotHandlingPolicy`].
 /// 7. Convert all other character runs to one `replacement_delimiter`.
 /// 8. Trim leading and trailing `replacement_delimiter` characters.
-/// 9. Apply `max_slug_chars` if present, then strip any trailing
+/// 9. Apply `max_slug_chars` if present, never separating a kept character
+///    from the combining marks after it, then strip any trailing
 ///    `replacement_delimiter` the cut exposed.
 /// 10. Apply [`EmptyOutputPolicy`] if the slug is empty.
 /// 11. Validate according to [`SlugValidationPolicy`].
@@ -260,6 +279,7 @@ pub fn slugify(input: &str, config: &SlugConfig) -> Result<SlugResult, SlugError
             trimmed.to_string(),
             max_slug_chars,
             config.replacement_delimiter,
+            config.dot_handling_policy,
         ),
         None => trimmed.to_string(),
     };
@@ -300,6 +320,10 @@ fn apply_transliteration(
 
     if map.iter().any(|(pattern, _)| pattern.is_empty()) {
         return Err(SlugError::EmptyTransliterationPattern);
+    }
+    let mut patterns = BTreeSet::new();
+    if map.iter().any(|(pattern, _)| !patterns.insert(*pattern)) {
+        return Err(SlugError::DuplicateTransliterationPattern);
     }
 
     let mut output = String::with_capacity(input.len());
@@ -354,9 +378,16 @@ fn validate_generated_grammar(value: &str, config: &SlugConfig) -> Result<(), Sl
         });
     }
     let mut previous: Option<char> = None;
+    let mut previous_kept = false;
     let mut chars = value.chars().peekable();
     while let Some(scalar) = chars.next() {
-        let ok = is_allowed(scalar, config.allowed_character_set)
+        if scalar == config.replacement_delimiter && previous == Some(scalar) {
+            return Err(SlugError::FallbackViolatesConfig {
+                reason: "a generated slug never repeats the replacement delimiter",
+            });
+        }
+        let kept = keeps(scalar, previous_kept, config.allowed_character_set);
+        let ok = kept
             || scalar == config.replacement_delimiter
             || (scalar == '.'
                 && should_preserve_dot(
@@ -375,13 +406,14 @@ fn validate_generated_grammar(value: &str, config: &SlugConfig) -> Result<(), Sl
             });
         }
         previous = Some(scalar);
+        previous_kept = kept;
     }
     Ok(())
 }
 
 fn validate_replacement_delimiter(config: &SlugConfig) -> Result<(), SlugError> {
     let delimiter = config.replacement_delimiter;
-    let reason = if is_allowed(delimiter, config.allowed_character_set) {
+    let reason = if keeps(delimiter, true, config.allowed_character_set) {
         Some("the allowed character set keeps it from the input")
     } else if delimiter == '.' && config.dot_handling_policy != DotHandlingPolicy::ReplaceAllDots {
         Some("the dot handling policy preserves it from the input")
@@ -402,10 +434,12 @@ fn validate_replacement_delimiter(config: &SlugConfig) -> Result<(), SlugError> 
 fn filter_chars(input: &str, config: &SlugConfig) -> String {
     let mut output = String::with_capacity(input.len());
     let mut previous: Option<char> = None;
+    let mut previous_kept = false;
     let mut chars = input.chars().peekable();
 
     while let Some(ch) = chars.next() {
-        if is_allowed(ch, config.allowed_character_set) {
+        let kept = keeps(ch, previous_kept, config.allowed_character_set);
+        if kept {
             output.push(ch);
         } else if ch == '.'
             && should_preserve_dot(previous, chars.peek().copied(), config.dot_handling_policy)
@@ -415,6 +449,7 @@ fn filter_chars(input: &str, config: &SlugConfig) -> String {
             push_replacement_delimiter(&mut output, config.replacement_delimiter);
         }
         previous = Some(ch);
+        previous_kept = kept;
     }
 
     output
@@ -431,11 +466,32 @@ fn push_replacement_delimiter(output: &mut String, replacement_delimiter: char) 
 /// `replacement_delimiter` the cut may have exposed. Filtering collapses interior
 /// runs to one delimiter, so cutting mid-run can leave the slug ending in the
 /// delimiter; trimming it keeps the result clean and never above `max_chars`.
-fn truncate_chars(mut value: String, max_chars: usize, replacement_delimiter: char) -> String {
-    if let Some((byte_index, _)) = value.char_indices().nth(max_chars) {
-        value.truncate(byte_index);
+/// A decimal-only dot exposed at the end is dropped because it lost its next digit.
+///
+/// A cut that lands on a combining mark backs up past the character it belongs
+/// to, dropping that whole character rather than leaving its base without the
+/// marks that complete it: `ไม่` cut to two scalars is `ไ`, not `ไม`, which is a
+/// different word.
+fn truncate_chars(
+    mut value: String,
+    max_chars: usize,
+    replacement_delimiter: char,
+    dots: DotHandlingPolicy,
+) -> String {
+    let boundaries: Vec<(usize, char)> = value.char_indices().collect();
+    if max_chars < boundaries.len() {
+        let mut cut = max_chars;
+        while cut > 0
+            && boundaries[cut].1 != replacement_delimiter
+            && is_combining_mark(boundaries[cut].1)
+        {
+            cut -= 1;
+        }
+        value.truncate(boundaries[cut].0);
     }
-    while value.ends_with(replacement_delimiter) {
+    while value.ends_with(replacement_delimiter)
+        || (dots == DotHandlingPolicy::PreserveDotsBetweenDecimalDigits && value.ends_with('.'))
+    {
         value.pop();
     }
     value
@@ -459,14 +515,32 @@ fn should_preserve_dot(
     }
 }
 
-fn is_allowed(ch: char, allowed_character_set: AllowedCharacterSet) -> bool {
+/// Whether the character set keeps `ch`, given whether the character before it
+/// was kept. Only a combining mark depends on that context: it is kept where it
+/// completes a kept character and filtered where it would stand alone.
+fn keeps(ch: char, previous_kept: bool, allowed_character_set: AllowedCharacterSet) -> bool {
     match allowed_character_set {
         AllowedCharacterSet::UnicodeAlphanumericCharacters => ch.is_alphanumeric(),
         AllowedCharacterSet::AsciiAlphanumericCharacters => ch.is_ascii_alphanumeric(),
         AllowedCharacterSet::UnicodeLettersAndDecimalDigits => {
             is_unicode_letter(ch) || is_unicode_decimal_digit(ch)
         }
+        AllowedCharacterSet::UnicodeLettersMarksAndDecimalDigits => {
+            is_unicode_letter(ch)
+                || is_unicode_decimal_digit(ch)
+                || (previous_kept && is_combining_mark(ch))
+        }
     }
+}
+
+fn is_combining_mark(ch: char) -> bool {
+    !ch.is_ascii()
+        && matches!(
+            get_general_category(ch),
+            GeneralCategory::NonspacingMark
+                | GeneralCategory::SpacingMark
+                | GeneralCategory::EnclosingMark
+        )
 }
 
 fn is_unicode_letter(ch: char) -> bool {
@@ -708,16 +782,63 @@ mod tests {
 
     #[test]
     fn transliteration_prefers_the_longest_match() {
-        static MAP: &[(&str, &str)] = &[("a", "1"), ("abc", "9")];
-        let config = SlugConfig {
-            transliteration_policy: TransliterationPolicy::StaticReplacementMap(MAP),
-            ..SlugConfig::default()
-        };
+        static MAP: &[(&str, &str)] = &[("a", "1"), ("ab", "8"), ("abc", "9")];
+        static REVERSED: &[(&str, &str)] = &[("abc", "9"), ("ab", "8"), ("a", "1")];
 
-        // "abc" matches both "a" and "abc" at index 0; the longer pattern wins
-        // regardless of slice order.
-        assert_eq!(slug("abc", &config), Ok("9".to_string()));
-        assert_eq!(slug("ax", &config), Ok("1x".to_string()));
+        for map in [MAP, REVERSED] {
+            let config = SlugConfig {
+                transliteration_policy: TransliterationPolicy::StaticReplacementMap(map),
+                ..SlugConfig::default()
+            };
+            // Unique overlapping patterns retain their longest-match result
+            // regardless of slice order.
+            for (input, expected) in [("abc", "9"), ("abx", "8x"), ("ax", "1x"), ("", "")] {
+                assert_eq!(slug(input, &config), Ok(expected.to_string()));
+            }
+        }
+    }
+
+    #[test]
+    fn duplicate_transliteration_patterns_are_rejected_before_input() {
+        static SAME: &[(&str, &str)] = &[("ab", "x"), ("other", "z"), ("ab", "x")];
+        static SAME_REORDERED: &[(&str, &str)] = &[("other", "z"), ("ab", "x"), ("ab", "x")];
+        static CONFLICT: &[(&str, &str)] = &[("ab", "x"), ("ab", "y")];
+        static CONFLICT_REVERSED: &[(&str, &str)] = &[("ab", "y"), ("ab", "x")];
+        for map in [SAME, SAME_REORDERED, CONFLICT, CONFLICT_REVERSED] {
+            let config = SlugConfig {
+                transliteration_policy: TransliterationPolicy::StaticReplacementMap(map),
+                ..SlugConfig::default()
+            };
+            for input in ["", "ordinary", "ab"] {
+                assert_eq!(
+                    slugify(input, &config),
+                    Err(SlugError::DuplicateTransliterationPattern)
+                );
+            }
+        }
+        assert_eq!(
+            SlugError::DuplicateTransliterationPattern.to_string(),
+            "transliteration patterns must be unique"
+        );
+    }
+
+    #[test]
+    fn empty_transliteration_patterns_take_precedence_over_repetitions() {
+        static EMPTY_FIRST: &[(&str, &str)] = &[("", "z"), ("ab", "x"), ("ab", "y")];
+        static EMPTY_LAST: &[(&str, &str)] = &[("ab", "y"), ("ab", "x"), ("", "z")];
+        static EMPTY_REPEATED: &[(&str, &str)] = &[("", "x"), ("", "y")];
+        for map in [EMPTY_FIRST, EMPTY_LAST, EMPTY_REPEATED] {
+            let config = SlugConfig {
+                transliteration_policy: TransliterationPolicy::StaticReplacementMap(map),
+                ..SlugConfig::default()
+            };
+            for input in ["", "ordinary", "ab"] {
+                assert_eq!(
+                    slugify(input, &config),
+                    Err(SlugError::EmptyTransliterationPattern)
+                );
+            }
+        }
     }
 
     #[test]
@@ -766,8 +887,8 @@ mod tests {
     #[test]
     fn every_scalar_in_a_slug_is_one_the_character_set_admits() {
         // `İ` lowercases to `i` plus a combining dot. Lowercasing after the
-        // filter let that dot into the slug even though no character set here
-        // would have kept it, so `allowed_character_set` stopped describing the
+        // filter let that dot into the slug even though the character set would
+        // not have kept it, so `allowed_character_set` stopped describing the
         // output. Now the mapping happens first and the dot is a filtered run
         // like any other.
         let config = SlugConfig::default();
@@ -775,7 +896,7 @@ mod tests {
         assert_eq!(slugged, "i-stanbul");
         for scalar in slugged.chars() {
             assert!(
-                is_allowed(scalar, config.allowed_character_set)
+                keeps(scalar, true, config.allowed_character_set)
                     || scalar == config.replacement_delimiter,
                 "U+{:04X} is in the slug but not in its alphabet",
                 scalar as u32
@@ -880,6 +1001,65 @@ mod tests {
                 "`{delimiter}` must remain usable"
             );
         }
+    }
+
+    #[test]
+    fn decimal_dot_truncation_always_satisfies_fallback_grammar() {
+        for input in [
+            "Ubuntu 16.04",
+            "Release 2024.10 notes",
+            "版本 １２.３４ xyz",
+        ] {
+            for limit in 1..=input.chars().count() {
+                let mut config = SlugConfig {
+                    max_slug_chars: Some(limit),
+                    dot_handling_policy: DotHandlingPolicy::PreserveDotsBetweenDecimalDigits,
+                    ..SlugConfig::default()
+                };
+                let generated = slug(input, &config).unwrap();
+                assert!(!generated.ends_with('.'), "{input} at {limit}");
+                if !generated.is_empty() {
+                    config.empty_output_policy =
+                        EmptyOutputPolicy::UseFallbackSlug(generated.clone());
+                    assert_eq!(slug("!!!", &config).unwrap(), generated);
+                }
+            }
+        }
+        for (input, limit, expected) in [
+            ("Ubuntu 16.04", 10, "ubuntu-16"),
+            ("Release 2024.10 notes", 13, "release-2024"),
+        ] {
+            let config = SlugConfig {
+                max_slug_chars: Some(limit),
+                dot_handling_policy: DotHandlingPolicy::PreserveDotsBetweenDecimalDigits,
+                ..SlugConfig::default()
+            };
+            assert_eq!(slug(input, &config).unwrap(), expected);
+        }
+        let config = SlugConfig {
+            max_slug_chars: Some(2),
+            dot_handling_policy: DotHandlingPolicy::PreserveAllDots,
+            ..SlugConfig::default()
+        };
+        assert_eq!(slug("a.b", &config).unwrap(), "a.");
+    }
+
+    #[test]
+    fn generated_fallback_rejects_repeated_delimiters_but_verbatim_keeps_them() {
+        let mut config = SlugConfig {
+            empty_output_policy: EmptyOutputPolicy::UseFallbackSlug("a--b".into()),
+            ..SlugConfig::default()
+        };
+        assert_eq!(
+            slug("!!!", &config),
+            Err(SlugError::FallbackViolatesConfig {
+                reason: "a generated slug never repeats the replacement delimiter",
+            })
+        );
+        config.empty_output_policy = EmptyOutputPolicy::UseVerbatimFallbackSlug("a--b".into());
+        assert_eq!(slug("!!!", &config).unwrap(), "a--b");
+        config.empty_output_policy = EmptyOutputPolicy::UseFallbackSlug("a-b".into());
+        assert_eq!(slug("!!!", &config).unwrap(), "a-b");
     }
 
     #[test]
@@ -1039,5 +1219,119 @@ mod tests {
             validate_slug("safe-現在-16.04", SlugValidationPolicy::UrlPathSegment),
             Ok(())
         );
+    }
+
+    fn marks_config() -> SlugConfig {
+        SlugConfig {
+            allowed_character_set: AllowedCharacterSet::UnicodeLettersMarksAndDecimalDigits,
+            ..SlugConfig::default()
+        }
+    }
+
+    #[test]
+    fn only_the_marks_set_keeps_words_written_with_combining_marks_whole() {
+        let alphanumeric = SlugConfig::default();
+        let letters_digits = SlugConfig {
+            allowed_character_set: AllowedCharacterSet::UnicodeLettersAndDecimalDigits,
+            ..SlugConfig::default()
+        };
+        let marks = marks_config();
+        // Thai and Lao tone marks, a Devanagari virama, a Tamil pulli: none of
+        // them carries the `Alphabetic` property, so only the marks set keeps them.
+        for (input, alphanumeric_slug, letters_digits_slug) in [
+            ("ไม่ใช่", "ไม-ใช", "ไม-ใช"),
+            ("ກ່ອນ", "ກ-ອນ", "ກ-ອນ"),
+            ("नमस्ते", "नमस-ते", "नमस-त"),
+            ("தமிழ்", "தமிழ", "தம-ழ"),
+        ] {
+            assert_eq!(
+                slug(input, &alphanumeric),
+                Ok(alphanumeric_slug.to_string())
+            );
+            assert_eq!(
+                slug(input, &letters_digits),
+                Ok(letters_digits_slug.to_string())
+            );
+            assert_eq!(slug(input, &marks), Ok(input.to_string()));
+        }
+        assert_eq!(slug("नमस्ते दुनिया", &marks), Ok("नमस्ते-दुनिया".to_string()));
+        // A decomposed accent completes its letter instead of splitting it.
+        assert_eq!(
+            slug("Cafe\u{301} Noir", &marks),
+            Ok("cafe\u{301}-noir".to_string())
+        );
+        // The set admits the combining dot `İ` lowercases to, so it stays.
+        assert_eq!(
+            slug("\u{0130}stanbul", &marks),
+            Ok("i\u{307}stanbul".to_string())
+        );
+    }
+
+    #[test]
+    fn a_mark_with_nothing_kept_before_it_is_filtered() {
+        let marks = marks_config();
+        assert_eq!(slug("\u{301}abc", &marks), Ok("abc".to_string()));
+        assert_eq!(slug("a \u{301}b", &marks), Ok("a-b".to_string()));
+        assert_eq!(slug("\u{E48}\u{E48}", &marks), Ok(String::new()));
+        let dots = SlugConfig {
+            dot_handling_policy: DotHandlingPolicy::PreserveAllDots,
+            ..marks_config()
+        };
+        assert_eq!(slug("1.\u{301}2", &dots), Ok("1.-2".to_string()));
+    }
+
+    #[test]
+    fn truncation_never_leaves_a_character_without_its_marks() {
+        let cut = |max| SlugConfig {
+            max_slug_chars: Some(max),
+            ..marks_config()
+        };
+        // ไ ม ่ ใ ช ่: a cut after `ม` would drop its tone mark and spell a
+        // different word, so the whole character goes.
+        assert_eq!(slug("ไม่ใช่", &cut(2)), Ok("ไ".to_string()));
+        assert_eq!(slug("ไม่ใช่", &cut(3)), Ok("ไม่".to_string()));
+        assert_eq!(slug("ไม่ใช่", &cut(1)), Ok("ไ".to_string()));
+        assert_eq!(slug("\u{E44}\u{E21}\u{E48}", &cut(0)), Ok(String::new()));
+
+        // The default set keeps Devanagari vowel signs, so it gets the same
+        // protection: न म स - त े cut to five is not `नमस-त`.
+        let default_cut = SlugConfig {
+            max_slug_chars: Some(5),
+            ..SlugConfig::default()
+        };
+        assert_eq!(slug("नमस्ते", &default_cut), Ok("नमस".to_string()));
+    }
+
+    #[test]
+    fn the_marks_set_refuses_a_mark_as_its_delimiter() {
+        let config = SlugConfig {
+            replacement_delimiter: '\u{301}',
+            ..marks_config()
+        };
+        assert_eq!(
+            slugify("a b", &config),
+            Err(SlugError::AmbiguousReplacementDelimiter {
+                delimiter: '\u{301}',
+                reason: "the allowed character set keeps it from the input",
+            })
+        );
+    }
+
+    #[test]
+    fn a_fallback_under_the_marks_set_follows_the_same_attachment_rule() {
+        let fallback = |value: &str| SlugConfig {
+            empty_output_policy: EmptyOutputPolicy::UseFallbackSlug(value.to_string()),
+            ..marks_config()
+        };
+        assert_eq!(slug("!!!", &fallback("ไม่-ใช่")), Ok("ไม่-ใช่".to_string()));
+        for orphaned in ["\u{301}a", "a-\u{301}b"] {
+            assert_eq!(
+                slug("!!!", &fallback(orphaned)),
+                Err(SlugError::FallbackViolatesConfig {
+                    reason: "it contains a character this configuration would have filtered out",
+                }),
+                "{orphaned:?}"
+            );
+        }
     }
 }

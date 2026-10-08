@@ -109,9 +109,25 @@ Arguments across every shape above:
 
 Generate a slug from input text.
 
+#### `slugify` — Keep an empty slug when filtering removes every character
+
 ```
-afslug slugify <TEXT> [--delimiter <CHAR>] [--no-lowercase] [--max-chars <N>] [--charset <unicode-alphanumeric|ascii-alphanumeric|unicode-letters-digits>] [--dots <replace|preserve|preserve-between-digits>] [--validation <none|local-path|url-path>] [--fallback <SLUG>] [--fallback-verbatim <SLUG>]
+afslug slugify <TEXT> [--delimiter <CHAR>] [--no-lowercase] [--max-chars <N>] [--charset <unicode-alphanumeric|ascii-alphanumeric|unicode-letters-digits|unicode-letters-marks-digits>] [--dots <replace|preserve|preserve-between-digits>] [--validation <none|local-path|url-path>]
 ```
+
+#### `slugify-fallback` — Replace an empty slug with a fallback that satisfies the configuration
+
+```
+afslug slugify <TEXT> [--delimiter <CHAR>] [--no-lowercase] [--max-chars <N>] [--charset <unicode-alphanumeric|ascii-alphanumeric|unicode-letters-digits|unicode-letters-marks-digits>] [--dots <replace|preserve|preserve-between-digits>] [--validation <none|local-path|url-path>] --fallback <SLUG>
+```
+
+#### `slugify-fallback-verbatim` — Replace an empty slug with a stored value, checking only path validation
+
+```
+afslug slugify <TEXT> [--delimiter <CHAR>] [--no-lowercase] [--max-chars <N>] [--charset <unicode-alphanumeric|ascii-alphanumeric|unicode-letters-digits|unicode-letters-marks-digits>] [--dots <replace|preserve|preserve-between-digits>] [--validation <none|local-path|url-path>] --fallback-verbatim <SLUG>
+```
+
+Arguments across every shape above:
 
 | Argument | Meaning |
 |---|---|

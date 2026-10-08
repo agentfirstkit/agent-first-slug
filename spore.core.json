@@ -2,21 +2,27 @@
   "$schema": "https://cmn.dev/schemas/v1/spore-core.json",
   "id": "agent-first-slug",
   "name": "Agent-First Slug",
-  "version": "0.7.1",
+  "version": "0.8.0",
   "domain": "agentfirstkit.com",
   "key": "ed25519.BwbSzqdDYyMN1pPW5snRk3afrJAovHn8aueMvDpfNKVw",
   "synopsis": "Rust slug generation with explicit caller configuration for path and URL path segments.",
   "intent": [
     "Provide a reusable slug primitive where callers configure character classes, dots, transliteration, truncation, empty behavior, and validation instead of relying on hard-coded product rules",
     "Keep the library generic: no presets, downstream project names, hidden fallback words, or built-in legacy modes",
-    "Provide a small afslug CLI that applies the default rules and emits AFDATA protocol events for one-off use",
+    "Provide a small afslug CLI that supports explicit slug configuration and emits AFDATA protocol events for one-off use",
     "Publish the agent-first-slug skill with explicit Rust library and afslug CLI workflows",
     "Make slug generation deterministic and test-covered so callers can preserve or migrate their own identifiers intentionally"
   ],
   "license": "MIT",
   "mutations": [
-    "State only the violation in a slug error message and move the remedy into each surface's own diagnostic, so a caller holding a command line is told to pass --fallback-verbatim or a different --delimiter instead of to reach for a Rust enum variant it has no way to type",
-    "Emit slug errors with an AFDATA hint field naming the flag to reach for, matching the message/hint split the rest of the CLI already follows"
+    "Add the unicode-letters-marks-digits character set, which keeps Thai, Devanagari, Tamil and other words written with combining marks whole",
+    "Truncate without cutting a character away from its combining marks",
+    "Strip a trailing decimal-only dot exposed by truncation",
+    "Reject repeated transliteration patterns with DuplicateTransliterationPattern",
+    "Reject a fallback that repeats the replacement delimiter",
+    "Split slugify into three CLI shapes so --fallback and --fallback-verbatim are separate registered combinations",
+    "Report invalid --delimiter and --max-chars values as JSON on stderr",
+    "Move to agent-first-data 0.35.0"
   ],
   "bonds": [],
   "tree": {
