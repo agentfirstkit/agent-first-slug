@@ -75,7 +75,9 @@ assert_eq!(slug, "ubuntu-16.04");
   `UseFallbackSlug` requires it to satisfy the same character set, delimiter,
   dot, case and length rules. Use `UseVerbatimFallbackSlug` (`--fallback-verbatim`)
   only for a value that must match something already stored; it checks the
-  target surface and nothing else.
+  target surface and nothing else. Both are checked before any input is read,
+  so a broken or empty fallback fails on every call — a passing call means the
+  fallback is valid, not that it was never reached.
 - **A slug is not an identifier.** It carries no uniqueness, no authorization
   and no atomic creation guarantee: different inputs legitimately produce the
   same slug, and the default configuration can produce an empty one. When
@@ -116,7 +118,11 @@ afslug validate "my-slug" --policy url-path
 
 `--output` accepts `json`, `yaml`, or `plain`. Bare `--version` and explicit
 JSON/YAML/plain version requests are structured AFDATA results. Slug failures
-are AFDATA error events with nonzero exit status. Under the default
+are AFDATA error events whose `error.code` names the rule that failed
+(`path_segment_separator`, `fallback_violates_config`,
+`ambiguous_replacement_delimiter`, …). A configuration the flags spelled out
+wrongly exits 2, like any other invalid argument value; a value that fails
+validation exits 1. Under the default
 `--output-to split` they go to stderr; select `--output-to stdout` for one
 ordered event stream — but note that an invocation rejected *before* it runs
 cannot honor that request, because the routing flag is part of the argv being

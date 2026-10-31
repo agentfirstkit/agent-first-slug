@@ -99,6 +99,22 @@ fn slugify_honors_config_flags() {
 }
 
 #[test]
+fn maximum_character_count_never_wraps_on_narrow_platforms() {
+    let value = i64::MAX.to_string();
+    let output = run(&["slugify", "hello", "--max-chars", &value]);
+    if usize::try_from(i64::MAX).is_ok() {
+        assert!(output.status.success());
+        assert_eq!(stdout_json(&output)["result"]["slug"], "hello");
+    } else {
+        assert_eq!(output.status.code(), Some(2));
+        assert_eq!(
+            stderr_json(&output)["error"]["code"],
+            "cli_invalid_argument_value"
+        );
+    }
+}
+
+#[test]
 fn slugify_keeps_case_when_lowercasing_is_disabled() {
     let output = run(&["slugify", "Hello World", "--no-lowercase"]);
 
@@ -137,10 +153,10 @@ fn slugify_holds_a_fallback_to_the_single_delimiter_rule() {
     // A generated slug never repeats its delimiter, so a fallback that does is
     // not one this configuration could have produced.
     let rejected = run(&["slugify", "!!!", "--fallback", "a--b"]);
-    assert_eq!(rejected.status.code(), Some(1));
+    assert_eq!(rejected.status.code(), Some(2));
     assert!(rejected.stdout.is_empty());
     let error = stderr_json(&rejected)["error"].clone();
-    assert_eq!(error["code"], "slug_error");
+    assert_eq!(error["code"], "fallback_violates_config");
     assert_eq!(
         error["message"],
         "fallback slug does not satisfy this configuration: \
@@ -268,7 +284,7 @@ fn slugify_validation_failure_is_a_structured_error() {
     assert_eq!(output.status.code(), Some(1));
     let event = stderr_json(&output);
     assert_eq!(event["kind"], "error");
-    assert_eq!(event["error"]["code"], "slug_error");
+    assert_eq!(event["error"]["code"], "empty_path_segment");
 }
 
 #[test]
@@ -277,7 +293,7 @@ fn a_remedy_offered_here_is_one_a_command_line_can_type() {
     // Rust path and not something an agent holding a command line can type.
     // What is wrong is the library's to say; what to do about it belongs to
     // whichever surface is being spoken to.
-    for (args, fragment) in [
+    for (args, code, fragment) in [
         (
             vec![
                 "slugify",
@@ -289,17 +305,24 @@ fn a_remedy_offered_here_is_one_a_command_line_can_type() {
                 "--fallback",
                 "Ünïcode",
             ],
+            "fallback_violates_config",
             "--fallback-verbatim",
         ),
         (
             vec!["slugify", "hello world", "--delimiter", "a"],
+            "ambiguous_replacement_delimiter",
             "--delimiter",
+        ),
+        (
+            vec!["slugify", "hello", "--fallback", ""],
+            "empty_fallback_slug",
+            "omit the fallback",
         ),
     ] {
         let output = run(&args);
-        assert_eq!(output.status.code(), Some(1), "{args:?}");
+        assert_eq!(output.status.code(), Some(2), "{args:?}");
         let error = stderr_json(&output)["error"].clone();
-        assert_eq!(error["code"], "slug_error", "{args:?}");
+        assert_eq!(error["code"], code, "{args:?}");
 
         let hint = error["hint"].as_str().unwrap_or_default();
         assert!(
@@ -350,8 +373,34 @@ fn validate_rejects_an_invalid_segment_as_a_structured_error() {
     assert_eq!(output.status.code(), Some(1));
     let event = stderr_json(&output);
     assert_eq!(event["kind"], "error");
-    assert_eq!(event["error"]["code"], "slug_error");
+    assert_eq!(event["error"]["code"], "path_segment_separator");
     assert_eq!(event["error"]["retryable"], false);
+}
+
+#[test]
+fn a_broken_fallback_is_refused_even_when_the_slug_is_not_empty() {
+    for args in [
+        vec!["slugify", "hello", "--fallback", "Bad"],
+        vec![
+            "slugify",
+            "hello",
+            "--fallback-verbatim",
+            "a/b",
+            "--validation",
+            "local-path",
+        ],
+    ] {
+        let output = run(&args);
+        assert!(output.stdout.is_empty(), "{args:?}");
+        let error = stderr_json(&output)["error"].clone();
+        let (code, exit) = if args.contains(&"--fallback") {
+            ("fallback_violates_config", 2)
+        } else {
+            ("path_segment_separator", 1)
+        };
+        assert_eq!(error["code"], code, "{args:?}");
+        assert_eq!(output.status.code(), Some(exit), "{args:?}");
+    }
 }
 
 #[test]
@@ -558,7 +607,7 @@ fn an_unknown_command_is_rejected_without_quoting_it() {
     assert_eq!(event["error"]["message"], "unknown command");
     assert_eq!(
         event["error"]["hint"],
-        "run `afslug --help` and choose one registered combination"
+        "run `afslug --help` to list the registered commands"
     );
     assert!(
         pseudo.stderr.len() < 256,
@@ -571,7 +620,10 @@ fn output_to_is_honored_once_an_invocation_resolves() {
     let resolved = run(&["validate", "bad/slug", "--output-to", "stdout"]);
     assert_eq!(resolved.status.code(), Some(1));
     assert!(resolved.stderr.is_empty());
-    assert_eq!(stdout_json(&resolved)["error"]["code"], "slug_error");
+    assert_eq!(
+        stdout_json(&resolved)["error"]["code"],
+        "path_segment_separator"
+    );
 }
 
 #[test]
@@ -593,6 +645,7 @@ fn docs_render_the_whole_registry_as_markdown() {
     let text = String::from_utf8(output.stdout).expect("docs are UTF-8");
 
     assert!(text.starts_with("# afslug CLI reference"), "{text:.80}");
+    assert!(text.contains("| 4 | Output could not be written (`output_write_failed`)"));
     for command in ["afslug slugify", "afslug validate", "afslug skill install"] {
         assert!(
             text.contains(command),
@@ -648,4 +701,36 @@ fn skill_install_bundles_skill_and_agent_asset() {
         "uninstall must remove the skill directory"
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn lifecycle_raw_output_failure_uses_the_standard_exit_and_diagnostic() {
+    use std::os::{fd::OwnedFd, unix::net::UnixDatagram};
+    // An unconnected datagram socket fails with a destination error. Rust's
+    // process stdout deliberately ignores EBADF, so a read-only file cannot
+    // exercise a real output failure here.
+    let sink = UnixDatagram::unbound().expect("unconnected output sink");
+    let output = Command::new(env!("CARGO_BIN_EXE_afslug"))
+        .arg("--docs")
+        .stdout(OwnedFd::from(sink))
+        .output()
+        .expect("run afslug");
+    assert_eq!(output.status.code(), Some(4));
+    assert_eq!(stderr_json(&output)["error"]["code"], "output_write_failed");
+}
+
+#[cfg(unix)]
+#[test]
+fn lifecycle_raw_output_accepts_a_closed_reader() {
+    use std::os::{fd::OwnedFd, unix::net::UnixStream};
+    let (writer, reader) = UnixStream::pair().expect("pipe");
+    drop(reader);
+    let output = Command::new(env!("CARGO_BIN_EXE_afslug"))
+        .arg("--docs")
+        .stdout(OwnedFd::from(writer))
+        .output()
+        .expect("run afslug");
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
 }

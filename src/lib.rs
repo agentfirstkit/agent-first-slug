@@ -2,10 +2,17 @@
 #![forbid(unsafe_code)]
 
 use std::borrow::Cow;
-use std::collections::BTreeSet;
 use std::fmt;
 
-use unicode_general_category::{GeneralCategory, get_general_category};
+mod pipeline;
+mod validation;
+
+use pipeline::{apply_transliteration, filter_chars, truncate_chars};
+
+use validation::{
+    validate_fallback, validate_local_path_segment, validate_replacement_delimiter,
+    validate_url_path_segment,
+};
 
 /// Rules used by [`slugify`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,7 +78,8 @@ pub enum DotHandlingPolicy {
     ReplaceAllDots,
     /// Preserve every dot.
     PreserveAllDots,
-    /// Preserve a dot only when the previous and next characters are decimal digits.
+    /// Preserve a dot only when the previous and next characters are decimal
+    /// digits that the character set keeps.
     PreserveDotsBetweenDecimalDigits,
 }
 
@@ -99,6 +107,10 @@ pub enum SlugValidationPolicy {
 }
 
 /// Behavior when the generated slug is empty.
+///
+/// A fallback must not be empty, and it is checked before any input is read:
+/// a fallback that breaks its rules is refused for every input, not only for
+/// the rare one whose slug comes out empty.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EmptyOutputPolicy {
     /// Return the empty slug.
@@ -175,6 +187,9 @@ pub enum SlugError {
         /// Which part of the configuration also claims it.
         reason: &'static str,
     },
+    /// An [`EmptyOutputPolicy`] fallback is empty, so it would replace an
+    /// empty slug with another empty slug.
+    EmptyFallbackSlug,
 }
 
 impl fmt::Display for SlugError {
@@ -191,16 +206,31 @@ impl fmt::Display for SlugError {
                 write!(f, "path segment must not contain separator `{character}`")
             }
             Self::PathSegmentWhitespace { character } => {
-                write!(f, "path segment must not contain whitespace `{character}`")
+                write!(
+                    f,
+                    "path segment must not contain whitespace U+{:04X}",
+                    *character as u32
+                )
             }
+            Self::EmptyFallbackSlug => write!(f, "fallback slug must not be empty"),
             Self::FallbackViolatesConfig { reason } => write!(
                 f,
                 "fallback slug does not satisfy this configuration: {reason}"
             ),
-            Self::AmbiguousReplacementDelimiter { delimiter, reason } => write!(
-                f,
-                "replacement delimiter `{delimiter}` is ambiguous: {reason}"
-            ),
+            Self::AmbiguousReplacementDelimiter { delimiter, reason } => {
+                // A combining mark would fuse with the opening backtick, so it
+                // is named by code point alone.
+                if validation::is_combining_mark(*delimiter) {
+                    write!(f, "replacement delimiter U+{:04X}", *delimiter as u32)?;
+                } else {
+                    write!(
+                        f,
+                        "replacement delimiter `{delimiter}` (U+{:04X})",
+                        *delimiter as u32
+                    )?;
+                }
+                write!(f, " is ambiguous: {reason}")
+            }
             Self::PathSegmentControlCharacter { character } => {
                 write!(
                     f,
@@ -225,21 +255,29 @@ impl std::error::Error for SlugError {}
 ///
 /// 1. Reject a `replacement_delimiter` this configuration could not tell apart
 ///    from an input character.
-/// 2. Reject empty or repeated transliteration patterns, then apply
+/// 2. Reject an [`EmptyOutputPolicy`] fallback that is empty, that breaks the
+///    rules below (`UseFallbackSlug`), or that fails [`SlugValidationPolicy`].
+/// 3. Reject empty or repeated transliteration patterns, then apply
 ///    [`TransliterationPolicy`]. Empty patterns take precedence over repetitions.
-/// 3. Lowercase if `lowercase_enabled` is `true`.
-/// 4. Walk characters left-to-right.
-/// 5. Keep characters allowed by [`AllowedCharacterSet`].
-/// 6. Apply [`DotHandlingPolicy`].
-/// 7. Convert all other character runs to one `replacement_delimiter`.
-/// 8. Trim leading and trailing `replacement_delimiter` characters.
-/// 9. Apply `max_slug_chars` if present, never separating a kept character
-///    from the combining marks after it, then strip any trailing
-///    `replacement_delimiter` the cut exposed.
-/// 10. Apply [`EmptyOutputPolicy`] if the slug is empty.
-/// 11. Validate according to [`SlugValidationPolicy`].
+/// 4. Lowercase if `lowercase_enabled` is `true`.
+/// 5. Walk characters left-to-right.
+/// 6. Keep characters allowed by [`AllowedCharacterSet`].
+/// 7. Apply [`DotHandlingPolicy`].
+/// 8. Convert all other character runs to one `replacement_delimiter`.
+/// 9. Trim leading and trailing `replacement_delimiter` characters.
+/// 10. Apply `max_slug_chars` if present, never separating a kept character
+///     from the combining marks after it, then strip any trailing
+///     `replacement_delimiter` the cut exposed.
+/// 11. Apply [`EmptyOutputPolicy`] if the slug is empty.
+/// 12. Validate according to [`SlugValidationPolicy`].
 ///
-/// Case mapping runs at step 3, before filtering, so every scalar in the result
+/// Steps 1 to 3 read only the configuration, so a configuration error is
+/// reported for every input, not only for the input that happens to reach the
+/// rule it breaks. A fallback is otherwise used only when the slug is empty,
+/// and checking it then would let a broken fallback pass every test that never
+/// produced an empty slug.
+///
+/// Case mapping runs at step 4, before filtering, so every scalar in the result
 /// is one the character set admits. It used to run after, and a case mapping
 /// that expands — `İ` becomes `i` plus a combining dot — put characters in the
 /// output that the character set would have rejected.
@@ -249,13 +287,14 @@ impl std::error::Error for SlugError {}
 /// segments, dot handling, and transliteration.
 ///
 /// An [`EmptyOutputPolicy::UseFallbackSlug`] value is inserted as written
-/// rather than run through the pipeline — steps 3 and 9 already ran on the
+/// rather than run through the pipeline — steps 4 and 10 already ran on the
 /// empty slug it replaces — but it is required to satisfy the same grammar
 /// those steps would have produced.
 /// [`EmptyOutputPolicy::UseVerbatimFallbackSlug`] waives that and checks only
 /// the target surface.
 pub fn slugify(input: &str, config: &SlugConfig) -> Result<SlugResult, SlugError> {
     validate_replacement_delimiter(config)?;
+    validate_fallback(config)?;
     let transliterated = apply_transliteration(input, config.transliteration_policy)?;
     // Case mapping runs before the filter, not after it.
     //
@@ -272,23 +311,28 @@ pub fn slugify(input: &str, config: &SlugConfig) -> Result<SlugResult, SlugError
     } else {
         transliterated
     };
-    let filtered = filter_chars(&cased, config);
-    let trimmed = filtered.trim_matches(config.replacement_delimiter);
+    let mut filtered = filter_chars(&cased, config);
+    // The filter never emits a leading delimiter. Trim the trailing run in
+    // place so both bounded and unbounded slugs keep the same allocation.
+    let end = filtered
+        .trim_end_matches(config.replacement_delimiter)
+        .len();
+    filtered.truncate(end);
     let truncated = match config.max_slug_chars {
         Some(max_slug_chars) => truncate_chars(
-            trimmed.to_string(),
+            filtered,
             max_slug_chars,
             config.replacement_delimiter,
             config.dot_handling_policy,
         ),
-        None => trimmed.to_string(),
+        None => filtered,
     };
     let slug = match (&config.empty_output_policy, truncated.is_empty()) {
-        (EmptyOutputPolicy::UseFallbackSlug(fallback), true) => {
-            validate_generated_grammar(fallback, config)?;
-            fallback.clone()
-        }
-        (EmptyOutputPolicy::UseVerbatimFallbackSlug(fallback), true) => fallback.clone(),
+        (
+            EmptyOutputPolicy::UseFallbackSlug(fallback)
+            | EmptyOutputPolicy::UseVerbatimFallbackSlug(fallback),
+            true,
+        ) => fallback.clone(),
         _ => truncated,
     };
 
@@ -309,300 +353,10 @@ pub fn validate_slug(value: &str, policy: SlugValidationPolicy) -> Result<(), Sl
     }
 }
 
-fn apply_transliteration(
-    input: &str,
-    policy: TransliterationPolicy,
-) -> Result<Cow<'_, str>, SlugError> {
-    let map = match policy {
-        TransliterationPolicy::None => return Ok(Cow::Borrowed(input)),
-        TransliterationPolicy::StaticReplacementMap(map) => map,
-    };
-
-    if map.iter().any(|(pattern, _)| pattern.is_empty()) {
-        return Err(SlugError::EmptyTransliterationPattern);
-    }
-    let mut patterns = BTreeSet::new();
-    if map.iter().any(|(pattern, _)| !patterns.insert(*pattern)) {
-        return Err(SlugError::DuplicateTransliterationPattern);
-    }
-
-    let mut output = String::with_capacity(input.len());
-    let mut remaining = input;
-    while !remaining.is_empty() {
-        if let Some((pattern, replacement)) = map
-            .iter()
-            .filter(|(pattern, _)| remaining.starts_with(*pattern))
-            .max_by_key(|(pattern, _)| pattern.len())
-        {
-            output.push_str(replacement);
-            remaining = &remaining[pattern.len()..];
-            continue;
-        }
-
-        let Some(ch) = remaining.chars().next() else {
-            break;
-        };
-        output.push(ch);
-        remaining = &remaining[ch.len_utf8()..];
-    }
-
-    Ok(Cow::Owned(output))
-}
-
-/// Refuse a delimiter this configuration would also keep from the input.
-///
-/// The delimiter plays three parts at once: a character a caller may type, the
-/// marker for a run of filtered characters, and the sentinel trimmed off both
-/// ends. Those only stay distinct while the delimiter is one the filter would
-/// never keep. With `a` as the delimiter, `alpha beta` and `lpha beta` both
-/// come out `lphabet` — the boundary is not inserted because the output already
-/// ends in `a`, and the trim then eats real letters off real words. Two
-/// different inputs, one slug, and characters the caller wrote silently gone.
-///
-/// So the invariant is checked before any input is read, rather than left to a
-/// path validation that happens to catch some cases later.
-/// Hold a fallback to the grammar the pipeline would have produced.
-fn validate_generated_grammar(value: &str, config: &SlugConfig) -> Result<(), SlugError> {
-    if let Some(max_slug_chars) = config.max_slug_chars
-        && value.chars().count() > max_slug_chars
-    {
-        return Err(SlugError::FallbackViolatesConfig {
-            reason: "it is longer than max_slug_chars",
-        });
-    }
-    if value.starts_with(config.replacement_delimiter)
-        || value.ends_with(config.replacement_delimiter)
-    {
-        return Err(SlugError::FallbackViolatesConfig {
-            reason: "a generated slug never begins or ends with the replacement delimiter",
-        });
-    }
-    let mut previous: Option<char> = None;
-    let mut previous_kept = false;
-    let mut chars = value.chars().peekable();
-    while let Some(scalar) = chars.next() {
-        if scalar == config.replacement_delimiter && previous == Some(scalar) {
-            return Err(SlugError::FallbackViolatesConfig {
-                reason: "a generated slug never repeats the replacement delimiter",
-            });
-        }
-        let kept = keeps(scalar, previous_kept, config.allowed_character_set);
-        let ok = kept
-            || scalar == config.replacement_delimiter
-            || (scalar == '.'
-                && should_preserve_dot(
-                    previous,
-                    chars.peek().copied(),
-                    config.dot_handling_policy,
-                ));
-        if !ok {
-            return Err(SlugError::FallbackViolatesConfig {
-                reason: "it contains a character this configuration would have filtered out",
-            });
-        }
-        if config.lowercase_enabled && scalar.to_lowercase().next() != Some(scalar) {
-            return Err(SlugError::FallbackViolatesConfig {
-                reason: "lowercasing is enabled and it is not lowercase",
-            });
-        }
-        previous = Some(scalar);
-        previous_kept = kept;
-    }
-    Ok(())
-}
-
-fn validate_replacement_delimiter(config: &SlugConfig) -> Result<(), SlugError> {
-    let delimiter = config.replacement_delimiter;
-    let reason = if keeps(delimiter, true, config.allowed_character_set) {
-        Some("the allowed character set keeps it from the input")
-    } else if delimiter == '.' && config.dot_handling_policy != DotHandlingPolicy::ReplaceAllDots {
-        Some("the dot handling policy preserves it from the input")
-    } else if config.lowercase_enabled && delimiter.to_lowercase().next() != Some(delimiter) {
-        // Lowercasing now runs before the delimiter is inserted, so an
-        // uppercase delimiter would be the one uppercase character in an
-        // otherwise lowercased slug.
-        Some("lowercasing changes it, so it would be the only uncased character in the slug")
-    } else {
-        None
-    };
-    match reason {
-        Some(reason) => Err(SlugError::AmbiguousReplacementDelimiter { delimiter, reason }),
-        None => Ok(()),
-    }
-}
-
-fn filter_chars(input: &str, config: &SlugConfig) -> String {
-    let mut output = String::with_capacity(input.len());
-    let mut previous: Option<char> = None;
-    let mut previous_kept = false;
-    let mut chars = input.chars().peekable();
-
-    while let Some(ch) = chars.next() {
-        let kept = keeps(ch, previous_kept, config.allowed_character_set);
-        if kept {
-            output.push(ch);
-        } else if ch == '.'
-            && should_preserve_dot(previous, chars.peek().copied(), config.dot_handling_policy)
-        {
-            output.push('.');
-        } else {
-            push_replacement_delimiter(&mut output, config.replacement_delimiter);
-        }
-        previous = Some(ch);
-        previous_kept = kept;
-    }
-
-    output
-}
-
-fn push_replacement_delimiter(output: &mut String, replacement_delimiter: char) {
-    if output.is_empty() || output.ends_with(replacement_delimiter) {
-        return;
-    }
-    output.push(replacement_delimiter);
-}
-
-/// Keep at most `max_chars` Unicode scalar values, then drop a trailing
-/// `replacement_delimiter` the cut may have exposed. Filtering collapses interior
-/// runs to one delimiter, so cutting mid-run can leave the slug ending in the
-/// delimiter; trimming it keeps the result clean and never above `max_chars`.
-/// A decimal-only dot exposed at the end is dropped because it lost its next digit.
-///
-/// A cut that lands on a combining mark backs up past the character it belongs
-/// to, dropping that whole character rather than leaving its base without the
-/// marks that complete it: `ไม่` cut to two scalars is `ไ`, not `ไม`, which is a
-/// different word.
-fn truncate_chars(
-    mut value: String,
-    max_chars: usize,
-    replacement_delimiter: char,
-    dots: DotHandlingPolicy,
-) -> String {
-    let boundaries: Vec<(usize, char)> = value.char_indices().collect();
-    if max_chars < boundaries.len() {
-        let mut cut = max_chars;
-        while cut > 0
-            && boundaries[cut].1 != replacement_delimiter
-            && is_combining_mark(boundaries[cut].1)
-        {
-            cut -= 1;
-        }
-        value.truncate(boundaries[cut].0);
-    }
-    while value.ends_with(replacement_delimiter)
-        || (dots == DotHandlingPolicy::PreserveDotsBetweenDecimalDigits && value.ends_with('.'))
-    {
-        value.pop();
-    }
-    value
-}
-
-fn should_preserve_dot(
-    previous: Option<char>,
-    next: Option<char>,
-    policy: DotHandlingPolicy,
-) -> bool {
-    match policy {
-        DotHandlingPolicy::ReplaceAllDots => false,
-        DotHandlingPolicy::PreserveAllDots => true,
-        DotHandlingPolicy::PreserveDotsBetweenDecimalDigits => {
-            matches!(
-                (previous, next),
-                (Some(previous), Some(next))
-                    if is_unicode_decimal_digit(previous) && is_unicode_decimal_digit(next)
-            )
-        }
-    }
-}
-
-/// Whether the character set keeps `ch`, given whether the character before it
-/// was kept. Only a combining mark depends on that context: it is kept where it
-/// completes a kept character and filtered where it would stand alone.
-fn keeps(ch: char, previous_kept: bool, allowed_character_set: AllowedCharacterSet) -> bool {
-    match allowed_character_set {
-        AllowedCharacterSet::UnicodeAlphanumericCharacters => ch.is_alphanumeric(),
-        AllowedCharacterSet::AsciiAlphanumericCharacters => ch.is_ascii_alphanumeric(),
-        AllowedCharacterSet::UnicodeLettersAndDecimalDigits => {
-            is_unicode_letter(ch) || is_unicode_decimal_digit(ch)
-        }
-        AllowedCharacterSet::UnicodeLettersMarksAndDecimalDigits => {
-            is_unicode_letter(ch)
-                || is_unicode_decimal_digit(ch)
-                || (previous_kept && is_combining_mark(ch))
-        }
-    }
-}
-
-fn is_combining_mark(ch: char) -> bool {
-    !ch.is_ascii()
-        && matches!(
-            get_general_category(ch),
-            GeneralCategory::NonspacingMark
-                | GeneralCategory::SpacingMark
-                | GeneralCategory::EnclosingMark
-        )
-}
-
-fn is_unicode_letter(ch: char) -> bool {
-    if ch.is_ascii() {
-        return ch.is_ascii_alphabetic();
-    }
-    matches!(
-        get_general_category(ch),
-        GeneralCategory::UppercaseLetter
-            | GeneralCategory::LowercaseLetter
-            | GeneralCategory::TitlecaseLetter
-            | GeneralCategory::ModifierLetter
-            | GeneralCategory::OtherLetter
-    )
-}
-
-fn is_unicode_decimal_digit(ch: char) -> bool {
-    if ch.is_ascii() {
-        return ch.is_ascii_digit();
-    }
-    get_general_category(ch) == GeneralCategory::DecimalNumber
-}
-
-fn validate_local_path_segment(value: &str) -> Result<(), SlugError> {
-    if value.is_empty() {
-        return Err(SlugError::EmptyPathSegment);
-    }
-    if value == "." || value == ".." {
-        return Err(SlugError::PathSegmentDotValue);
-    }
-
-    for ch in value.chars() {
-        match ch {
-            '/' | '\\' => return Err(SlugError::PathSegmentSeparator { character: ch }),
-            _ if ch.is_whitespace() => {
-                return Err(SlugError::PathSegmentWhitespace { character: ch });
-            }
-            _ if ch.is_control() => {
-                return Err(SlugError::PathSegmentControlCharacter { character: ch });
-            }
-            _ => {}
-        }
-    }
-
-    Ok(())
-}
-
-fn validate_url_path_segment(value: &str) -> Result<(), SlugError> {
-    validate_local_path_segment(value)?;
-
-    for ch in value.chars() {
-        if matches!(ch, '?' | '#' | '%') {
-            return Err(SlugError::UrlPathSegmentReservedCharacter { character: ch });
-        }
-    }
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::validation::{keeps, validate_generated_grammar};
 
     fn slug(input: &str, config: &SlugConfig) -> Result<String, SlugError> {
         slugify(input, config).map(|result| result.slug)
@@ -746,6 +500,36 @@ mod tests {
     }
 
     #[test]
+    fn decimal_dots_require_digits_kept_by_the_character_set() {
+        let config = SlugConfig {
+            allowed_character_set: AllowedCharacterSet::AsciiAlphanumericCharacters,
+            dot_handling_policy: DotHandlingPolicy::PreserveDotsBetweenDecimalDigits,
+            ..SlugConfig::default()
+        };
+        for (input, expected) in [
+            ("١.2", "2"),
+            ("1.٢", "1"),
+            ("a١.2", "a-2"),
+            ("1.٢b", "1-b"),
+            ("1.2", "1.2"),
+        ] {
+            let actual = slug(input, &config).expect("valid configuration");
+            assert_eq!(actual, expected, "{input}");
+            validate_generated_grammar(&actual, &config).expect("generated grammar");
+        }
+        assert_eq!(
+            slug(
+                "١.2",
+                &SlugConfig {
+                    dot_handling_policy: DotHandlingPolicy::PreserveAllDots,
+                    ..config
+                }
+            ),
+            Ok(".2".to_string())
+        );
+    }
+
+    #[test]
     fn unicode_letters_decimal_digits_excludes_letter_numbers() {
         let config = SlugConfig {
             allowed_character_set: AllowedCharacterSet::UnicodeLettersAndDecimalDigits,
@@ -792,7 +576,14 @@ mod tests {
             };
             // Unique overlapping patterns retain their longest-match result
             // regardless of slice order.
-            for (input, expected) in [("abc", "9"), ("abx", "8x"), ("ax", "1x"), ("", "")] {
+            for (input, expected) in [
+                ("abc", "9"),
+                ("abx", "8x"),
+                ("ax", "1x"),
+                ("界abc終", "界9終"),
+                ("界x終", "界x終"),
+                ("", ""),
+            ] {
                 assert_eq!(slug(input, &config), Ok(expected.to_string()));
             }
         }
@@ -1158,9 +949,94 @@ mod tests {
     }
 
     #[test]
+    fn a_broken_fallback_is_refused_for_input_that_never_needs_it() {
+        let config = |policy| SlugConfig {
+            validation_policy: SlugValidationPolicy::LocalPathSegment,
+            empty_output_policy: policy,
+            ..SlugConfig::default()
+        };
+        for (policy, expected) in [
+            (
+                EmptyOutputPolicy::UseFallbackSlug("Bad".into()),
+                SlugError::FallbackViolatesConfig {
+                    reason: "lowercasing is enabled and it is not lowercase",
+                },
+            ),
+            (
+                EmptyOutputPolicy::UseVerbatimFallbackSlug("bad/fallback".into()),
+                SlugError::PathSegmentSeparator { character: '/' },
+            ),
+            (
+                EmptyOutputPolicy::UseFallbackSlug(String::new()),
+                SlugError::EmptyFallbackSlug,
+            ),
+            (
+                EmptyOutputPolicy::UseVerbatimFallbackSlug(String::new()),
+                SlugError::EmptyFallbackSlug,
+            ),
+        ] {
+            for input in ["hello", "!!!", ""] {
+                assert_eq!(
+                    slugify(input, &config(policy.clone())),
+                    Err(expected.clone()),
+                    "{input:?}"
+                );
+            }
+        }
+        assert_eq!(
+            SlugError::EmptyFallbackSlug.to_string(),
+            "fallback slug must not be empty"
+        );
+    }
+
+    #[test]
     fn no_validation_accepts_raw_unsafe_value() {
         assert_eq!(validate_slug("", SlugValidationPolicy::None), Ok(()));
         assert_eq!(validate_slug("../x", SlugValidationPolicy::None), Ok(()));
+    }
+
+    #[test]
+    fn ambiguous_delimiter_diagnostics_name_the_code_point() {
+        let marks = SlugConfig {
+            allowed_character_set: AllowedCharacterSet::UnicodeLettersMarksAndDecimalDigits,
+            ..SlugConfig::default()
+        };
+        for (delimiter, named) in [
+            ('\u{301}', "replacement delimiter U+0301 is ambiguous"),
+            (
+                '\u{3164}',
+                "replacement delimiter `\u{3164}` (U+3164) is ambiguous",
+            ),
+            ('a', "replacement delimiter `a` (U+0061) is ambiguous"),
+        ] {
+            let error = slugify(
+                "a b",
+                &SlugConfig {
+                    replacement_delimiter: delimiter,
+                    ..marks.clone()
+                },
+            )
+            .expect_err("the character set keeps this delimiter");
+            assert!(
+                matches!(error, SlugError::AmbiguousReplacementDelimiter { .. }),
+                "{error:?}"
+            );
+            assert!(error.to_string().starts_with(named), "{error}");
+        }
+    }
+
+    #[test]
+    fn whitespace_diagnostics_identify_invisible_characters_without_line_breaks() {
+        for character in [' ', '\t', '\n', '\r', '\u{a0}', '\u{2003}'] {
+            let error = validate_slug(
+                &format!("a{character}b"),
+                SlugValidationPolicy::LocalPathSegment,
+            )
+            .expect_err("whitespace is forbidden");
+            let message = error.to_string();
+            assert!(message.contains(&format!("U+{:04X}", character as u32)));
+            assert!(!message.contains(['\n', '\r', '\t']));
+        }
     }
 
     #[test]

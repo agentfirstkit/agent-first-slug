@@ -277,7 +277,9 @@ character set, delimiter, dot policy, case and length. A fallback that does not
 is a configuration error, not a slug: without that check an ASCII-only,
 length-capped configuration could return an arbitrary Unicode string and report
 it as validated. `UseVerbatimFallbackSlug` waives it for a value that has to
-match something already stored, and checks only the target surface.
+match something already stored, and checks only the target surface. Either
+fallback must be nonempty, and both are checked before any input is read, so a
+broken fallback fails on the first call rather than on the first empty slug.
 
 ```rust
 use agent_first_slug::{slugify, EmptyOutputPolicy, SlugConfig, SlugError};
@@ -318,9 +320,26 @@ assert!(matches!(
 
 ## What Changed, And What To Check Before Upgrading
 
-Three rules that can change stored slugs or reject a configuration changed in
-0.8. If you have slugs already stored, run the old and new versions over your
-corpus and diff before upgrading.
+If you have slugs already stored, run the old and new versions over your corpus
+and diff before upgrading. Nothing normalizes input — see the skill for what
+that means for a stable-identifier contract.
+
+### Since 0.8.0
+
+**A decimal dot needs digits the character set keeps.** Under
+`PreserveDotsBetweenDecimalDigits`, a dot next to a digit the character set
+filters out is now a delimiter: ASCII-only `١.2` was `.2`, now `2`.
+
+**A fallback is checked before any input is read.** A `UseFallbackSlug` that
+breaks the configuration, a `UseVerbatimFallbackSlug` that fails the target
+surface, and an empty fallback of either kind (`SlugError::EmptyFallbackSlug`)
+are refused for every input, not only for one whose slug comes out empty.
+
+**`afslug` names each rule in `error.code`** (`path_segment_separator`,
+`fallback_violates_config`, …) instead of one `slug_error`, and a configuration
+error — delimiter, fallback — exits 2 like any other invalid argument value.
+
+### 0.8.0
 
 **Truncation no longer leaves a broken tail.** A cut that exposed a trailing
 dot under `PreserveDotsBetweenDecimalDigits` kept it (`version 1.2.3` at ten
@@ -334,9 +353,6 @@ same replacement, and even for empty input.
 
 **A fallback that repeats the delimiter is refused** under `UseFallbackSlug`,
 because the pipeline never produces one.
-
-Nothing normalizes input — see the skill for what that means for a
-stable-identifier contract.
 
 ## Validation Only
 

@@ -4,10 +4,9 @@ use agent_first_data::skill::{
     self, SkillAction, SkillAgentSelection, SkillAsset, SkillOptions, SkillScope, SkillSpec,
 };
 use agent_first_data::{
-    ArgSpec, BoundOutcome, BuiltCliSpec, CliEmitter, CliSpec, CliSpecError, CliValue, Combination,
-    CommandSpec, OutputFormat, OutputPlan, OutputSpec, OutputTo, ResolvedInvocation,
-    build_afdata_cli, cli_error_event, cli_help_event, cli_parse_output, cli_version_event,
-    render_cli_reference,
+    ArgSpec, BuiltCliSpec, CliEmitter, CliSpec, CliSpecError, CliValue, Combination, CommandSpec,
+    OutputFormat, OutputPlan, OutputSpec, OutputTo, ResolvedInvocation, build_afdata_cli,
+    cli_error_event,
 };
 use agent_first_slug::{
     AllowedCharacterSet, DotHandlingPolicy, EmptyOutputPolicy, SlugConfig, SlugError, SlugResult,
@@ -275,47 +274,16 @@ fn main() -> ExitCode {
         }
     };
 
-    match outcome {
-        BoundOutcome::Run(invocation) => invocation.run(),
-        // `--docs` renders the whole registry as raw Markdown, so it carries no
-        // format of its own and never becomes a protocol event.
-        BoundOutcome::Docs(docs) => write_text(
-            &render_cli_reference(&cli),
-            stream_of(docs.output_plan(), false),
-        ),
-        BoundOutcome::Help(help) => {
-            let (format, output_to) = plan_output(help.output_plan());
-            if format == OutputFormat::Plain {
-                write_text(&help.plain(), stream_of(help.output_plan(), false))
-            } else {
-                emit_event(cli_help_event(&help), format, output_to, 0)
-            }
-        }
-        BoundOutcome::Version(version) => {
-            let (format, output_to) = plan_output(version.output_plan());
-            emit_event(cli_version_event(&version), format, output_to, 0)
-        }
+    match outcome.into_run() {
+        Ok(invocation) => invocation.run(),
+        Err(exit) => exit,
     }
 }
 
 fn plan_output(plan: &OutputPlan) -> (OutputFormat, OutputTo) {
-    let format = plan
-        .format()
-        .and_then(|format| cli_parse_output(format).ok())
-        .unwrap_or(OutputFormat::Json);
-    let output_to = plan
-        .destination()
-        .and_then(|destination| OutputTo::parse(destination).ok())
-        .unwrap_or(OutputTo::Split);
+    let format = plan.output_format().unwrap_or(OutputFormat::Json);
+    let output_to = plan.output_to().unwrap_or(OutputTo::Split);
     (format, output_to)
-}
-
-fn stream_of(plan: &OutputPlan, is_error: bool) -> OutputTo {
-    if is_error || plan.destination() == Some("stderr") {
-        OutputTo::Stderr
-    } else {
-        OutputTo::Stdout
-    }
 }
 
 /// A value the matched shape declares as required or fixed.
@@ -367,7 +335,19 @@ fn run_slugify(invocation: &ResolvedInvocation) -> ExitCode {
 
     let max_slug_chars = match invocation.optional("max_chars").and_then(CliValue::as_i64) {
         None => None,
-        Some(value) if value >= 0 => Some(value as usize),
+        Some(value) if value >= 0 => match usize::try_from(value) {
+            Ok(value) => Some(value),
+            Err(_) => {
+                return emit_error_with_hint(
+                    "cli_invalid_argument_value",
+                    "--max-chars exceeds this platform's supported count",
+                    "pass a count no larger than the platform's pointer-sized unsigned integer",
+                    OutputFormat::Json,
+                    OutputTo::Stderr,
+                    2,
+                );
+            }
+        },
         Some(_) => {
             return emit_error_with_hint(
                 "cli_invalid_argument_value",
@@ -531,24 +511,54 @@ fn emit_result(value: Value, format: OutputFormat, output_to: OutputTo) -> ExitC
 /// Rust caller reaches for `EmptyOutputPolicy::UseVerbatimFallbackSlug`, and
 /// naming that in the shared message would tell an agent holding a command
 /// line to type something no command line has.
+///
+/// Each rule has its own `error.code`, so a caller branches on which rule
+/// failed instead of parsing the message. A configuration the flags spelled
+/// out wrongly exits 2 like any other invalid argument value; a value that
+/// fails validation exits 1.
 fn emit_slug_error(error: &SlugError, format: OutputFormat, output_to: OutputTo) -> ExitCode {
     let message = error.to_string();
-    match slug_error_hint(error) {
-        Some(hint) => emit_error_with_hint("slug_error", &message, hint, format, output_to, 1),
-        None => emit_error("slug_error", &message, format, output_to, 1),
+    let (code, exit_code, hint) = slug_error_contract(error);
+    match hint {
+        Some(hint) => emit_error_with_hint(code, &message, hint, format, output_to, exit_code),
+        None => emit_error(code, &message, format, output_to, exit_code),
     }
 }
 
-fn slug_error_hint(error: &SlugError) -> Option<&'static str> {
+fn slug_error_contract(error: &SlugError) -> (&'static str, u8, Option<&'static str>) {
     match error {
-        SlugError::FallbackViolatesConfig { .. } => Some(
-            "pass a --fallback this configuration could itself have produced, \
-             or --fallback-verbatim to insert the value as written",
-        ),
-        SlugError::AmbiguousReplacementDelimiter { .. } => {
-            Some("pass a --delimiter this configuration filters out, such as `-` or `_`")
+        SlugError::EmptyTransliterationPattern => ("empty_transliteration_pattern", 2, None),
+        SlugError::DuplicateTransliterationPattern => {
+            ("duplicate_transliteration_pattern", 2, None)
         }
-        _ => None,
+        SlugError::FallbackViolatesConfig { .. } => (
+            "fallback_violates_config",
+            2,
+            Some(
+                "pass a --fallback this configuration could itself have produced, \
+                 or --fallback-verbatim to insert the value as written",
+            ),
+        ),
+        SlugError::EmptyFallbackSlug => (
+            "empty_fallback_slug",
+            2,
+            Some("omit the fallback to keep an empty slug, or pass a nonempty value"),
+        ),
+        SlugError::AmbiguousReplacementDelimiter { .. } => (
+            "ambiguous_replacement_delimiter",
+            2,
+            Some("pass a --delimiter this configuration filters out, such as `-` or `_`"),
+        ),
+        SlugError::EmptyPathSegment => ("empty_path_segment", 1, None),
+        SlugError::PathSegmentSeparator { .. } => ("path_segment_separator", 1, None),
+        SlugError::PathSegmentWhitespace { .. } => ("path_segment_whitespace", 1, None),
+        SlugError::PathSegmentControlCharacter { .. } => {
+            ("path_segment_control_character", 1, None)
+        }
+        SlugError::PathSegmentDotValue => ("path_segment_dot_value", 1, None),
+        SlugError::UrlPathSegmentReservedCharacter { .. } => {
+            ("url_path_segment_reserved_character", 1, None)
+        }
     }
 }
 
@@ -600,15 +610,6 @@ fn emit_event(
 /// caller mistake, so it reports before any output contract has been resolved.
 fn emit_startup_error(code: &str, message: &str) -> ExitCode {
     emit_error(code, message, OutputFormat::Json, OutputTo::Stderr, 1)
-}
-
-// AFDATA injects the raw outcomes this writes (`--docs`, plain help), so it owns
-// the routing and the rule that a closed reader is success rather than failure.
-fn write_text(text: &str, output_to: OutputTo) -> ExitCode {
-    match agent_first_data::write_raw(text, output_to) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(_) => ExitCode::from(4),
-    }
 }
 
 #[cfg(test)]
