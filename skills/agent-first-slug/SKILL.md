@@ -162,3 +162,7 @@ across every agent that supports the scope, and `--agent <name>` targets one.
   errors, and bare structured version output through the repository test script.
 - A new argument combination is a registered shape, not a runtime check: add it
   to the registry so `--help` advertises it and the parser enforces it.
+
+## Reporting Problems
+
+If afslug itself is wrong — a crash, an internal error, or behavior that contradicts its docs, not a configuration or credential problem — or the person wants a missing feature, offer to open an issue at https://github.com/agentfirstkit/agent-first-slug/issues. Check for duplicates first. Include `afslug --version`, the command, `error.code`, and expected versus actual, with placeholder data only: never the person's data, paths, or secrets. File it with `gh issue create` only after the person approves the draft.

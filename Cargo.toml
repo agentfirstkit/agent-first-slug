@@ -1,8 +1,8 @@
 [package]
 name = "agent-first-slug"
-version = "0.9.0"
+version = "0.9.1"
 edition = "2024"
-rust-version = "1.98"
+rust-version = "1.99"
 description = "Rust slug generation with explicit caller configuration for path and URL path segments."
 license = "MIT"
 repository = "https://github.com/agentfirstkit/agent-first-slug"
@@ -28,7 +28,7 @@ default = ["cli"]
 cli = ["dep:agent-first-data", "dep:serde_json"]
 
 [dependencies]
-agent-first-data = { version = "0.36.1", default-features = false, features = ["cli", "skill-admin"], optional = true }
+agent-first-data = { version = "0.37.0", default-features = false, features = ["cli", "skill-admin"], optional = true }
 serde_json = { version = "1", optional = true }
 unicode-general-category = "1.1"
 
